@@ -6,26 +6,55 @@
 </p>
 
 # claude-phantom
+
 An autonomous crash-recovery agent for your terminal. Run your app through `phantom`; if it crashes, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix independently, and leaves a post-mortem. Your branch is never touched.
-```sh
-npm install -g claude-phantom
-phantom npm run dev
-```
 
 [![npm version](https://img.shields.io/npm/v/claude-phantom.svg)](https://www.npmjs.com/package/claude-phantom)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-success.svg)](package.json)
 
-<!--
-  Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape`
-  (see "Recording the demo GIF" below). Until it exists this image is a broken link.
--->
+<!-- Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape` (see "Demo GIF" below). -->
 ![phantom demo](docs/demo.gif)
+
+## Setup
+
+**You need:** Node >= 18, git (phantom only recovers inside a git repository), and the Claude Code CLI, logged in:
+
+```sh
+npm install -g @anthropic-ai/claude-code
+claude                         # follow the login prompt once
+```
+
+**Install and run:**
+
+```sh
+npm install -g claude-phantom
+phantom npm run dev            # any command; phantom is invisible until it crashes
+```
+
+That is the whole setup. On a crash, phantom creates `phantom/fix-<slug>-<ts>`, fixes it there, verifies, writes `.phantom/reports/<ts>-<slug>.md`, and puts you back on your branch with `git diff` / `git merge` / `git branch -D` commands to review, accept, or discard the fix.
+
+**Optional, one minute each** (details in [Claude Code integration](#claude-code-integration)):
+
+```sh
+phantom --notify npm run dev   # desktop notification on crash and when recovery ends
+```
+
+```
+/plugin marketplace add waazy-w/claude-phantom      # inside Claude Code: crash briefings in your chat
+/plugin install phantom@claude-phantom
+```
+
+```json
+{ "statusLine": { "type": "command", "command": "phantom-status" } }   // ~/.claude/settings.json: 👻 in the status bar
+```
+
+Recovery runs `claude -p` under your account and bills your Claude subscription or API key like any interactive session. `PHANTOM_DISABLED=1` turns phantom into a pure passthrough.
 
 ## How it works
 
-While your command runs, phantom is invisible: stdout and stderr stream through byte-for-byte, stdin is passed through, and the exit code is preserved. It keeps only the last 256 KiB of output in a ring buffer. When the process exits non-zero or dies from a signal (other than your own Ctrl+C), recovery starts.
+Your command runs exactly as before: stdout, stderr, and stdin stream through byte-for-byte, the exit code is preserved, and only the last 256 KiB of output is kept in a ring buffer. Recovery starts when the process exits non-zero or dies from a signal other than your own Ctrl+C.
 
 ```
   $ phantom npm start
@@ -71,175 +100,33 @@ While your command runs, phantom is invisible: stdout and stderr stream through 
   back on your original branch, exit code = your app's exit code
 ```
 
-Nothing in this flow trusts the agent's own word. The verification step runs your test command from phantom, not from inside the Claude session, and the never-touch audit diffs the branch against the starting commit after the session ends.
+Nothing here trusts the agent's own word: phantom runs your test command itself, outside the Claude session, and audits the branch against the starting commit after the session ends.
 
 ## Safety rails
 
-Each rail below names the mechanism, not just the promise.
-
 | Rail | Mechanism |
 |---|---|
-| Never your branch | `git checkout -b phantom/fix-<slug>-<ts>` from `HEAD` before any edit. Phantom checks your original branch back out when it finishes, succeeds or fails. The fix exists only as a branch you can diff, merge, or delete. |
-| Minimal tools | The headless session runs with `--permission-mode dontAsk` and an explicit allowlist: `Read, Edit, Write, MultiEdit, Grep, Glob`, your test command, `Bash(npm test *)`, `Bash(npm run test *)`, `Bash(npx vitest|jest|mocha *)`, `Bash(node *)`, and read-only git (`git diff`, `git log`, `git status`, `git show`) plus `ls`, `cat`, `head`, `tail`, `grep`, `pwd`. Every other tool call is denied without prompting. (Claude Code itself auto-approves read-only shell commands in headless mode; that is its policy, not something phantom can tighten.) |
-| Explicit denies on top | `WebFetch`, `WebSearch`, `Task`, `Agent`, `NotebookEdit`, `Bash(git push *)`, `Bash(git checkout *)`, `Bash(git switch *)`, `Bash(git reset *)`, `Bash(git stash *)`, `Bash(git rebase *)`, `Bash(git commit *)`, `Bash(git clean *)`, `Bash(rm *)`, `Bash(curl *)`, `Bash(wget *)`, `Bash(npm install *)`, `Bash(npm i *)`, `Bash(npm ci *)`, `Bash(npx prisma *)`, `Bash(sudo *)` are passed as `--disallowedTools`. Denies win over allows. |
-| Guard hook | A `PreToolUse` hook (`src/guard-hook.js`, zero dependencies, fails closed) inspects every `Bash`, `Edit`, `Write`, `Read`, `Grep` and `Glob` call before it runs. It blocks never-touch paths (including via `cat`, redirects, `../` traversal and absolute paths), destructive shell (`rm -r`, `chmod -R`, `dd`, `mkfs`, `kill`), package installs, network clients, migrations, container/cluster tools, `DROP TABLE`/`TRUNCATE`, and every git command that changes state. In dry-run it also blocks every write except the report file. |
-| Never-touch files, enforced three times | Globs from `neverTouch` (default: `.env`, `.env.*`, `**/*.pem`, `**/*.key`, `**/secrets/**`, `**/*.secret*`) plus the fixed `.git/**` and `node_modules/**` are (1) written as `Read`/`Edit`/`Write`/`MultiEdit`/`Grep`/`Glob` permission deny rules for the session, (2) checked by the guard hook on every tool call, and (3) audited after the session: `git diff --name-only <baseSha>` plus untracked files, *and* a size/mtime/inode snapshot of every never-touch file taken before the session (so a gitignored `.env` is covered too; contents are never read). Any match discards the session's changes (`git reset --hard && git clean -fd`) and the report says why. Files git does not track cannot be restored by phantom; the banner tells you to inspect them. |
-| No pushes, no PRs, ever | `git push` is on the deny list, there is no network tool, and phantom itself has no push code path. Not configurable. |
-| Ctrl+C is a kill switch | At any point during recovery: kills the Claude process tree, `git reset --hard` on the fix branch, `git clean -fd` there, checks out your original branch, pops the snapshot stash if one was taken, exits 130. One idempotent cleanup handler. |
-| Dirty tree refused | Uncommitted changes → status `refused`, nothing happens, your exit code is preserved. `--allow-dirty` stashes a snapshot (`git stash push -u -m "phantom-snapshot-<ts>"`) first, and pops it back automatically once you are back on your branch (also on Ctrl+C). If phantom has to leave you on the fix branch (`--no-commit`), it prints the exact `git stash pop` to run. `--dry-run` never needs a clean tree because it never writes outside `.phantom/`. |
-| Hard caps | `maxIterations` (default 3) bounds Claude invocations; `maxMinutes` (default 15) is a wall-clock timer that kills the child. Neither is advisory. |
-| Dry-run mode | `--dry-run`: `Edit`/`MultiEdit` are removed from the allowlist and the guard hook rejects every `Write` except the report file. No branch, no edits. The diagnosis and proposed unified diff go into the report. The only writes are under `.phantom/`. |
-| Off switch | `PHANTOM_DISABLED=1` turns phantom into a pure passthrough. |
+| Never your branch | `git checkout -b phantom/fix-<slug>-<ts>` from `HEAD` before any edit; your branch is checked back out when phantom finishes, success or failure. The fix exists only as a branch to diff, merge, or delete. |
+| Minimal tools | `--permission-mode dontAsk` with an explicit allowlist: `Read, Edit, Write, MultiEdit, Grep, Glob`, your test command, `npm test` / `npm run test` / `npx vitest\|jest\|mocha`, `node`, read-only git (`diff`, `log`, `status`, `show`), and `ls cat head tail grep pwd`. Everything else is denied without prompting. (Claude Code auto-approves read-only shell commands in headless mode; phantom cannot tighten that.) |
+| Explicit denies | `--disallowedTools`: `WebFetch`, `WebSearch`, `Task`, `Agent`, `NotebookEdit`, `git push/checkout/switch/reset/stash/rebase/commit/clean`, `rm`, `curl`, `wget`, `npm install/i/ci`, `npx prisma`, `sudo`. Denies win over allows. |
+| Guard hook | A zero-dependency `PreToolUse` hook (`src/guard-hook.js`, fails closed) inspects every `Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob` call: blocks never-touch paths (including via `cat`, redirects, `../`, absolute paths), destructive shell (`rm -r`, `chmod -R`, `dd`, `mkfs`, `kill`), installs, network clients, migrations, container/cluster tools, `DROP TABLE`/`TRUNCATE`, and every state-changing git command. In dry-run it blocks every write except the report. |
+| Never-touch files, enforced three times | `neverTouch` globs (default `.env`, `.env.*`, `**/*.pem`, `**/*.key`, `**/secrets/**`, `**/*.secret*`) plus the fixed `.git/**`, `node_modules/**` are (1) permission deny rules for the session, (2) checked by the guard hook on every call, (3) audited afterwards via `git diff --name-only <baseSha>`, untracked files, and a size/mtime/inode snapshot taken before the session (covers gitignored files; contents are never read). Any hit discards the session's changes (`git reset --hard && git clean -fd`) and the report says why. Untracked files cannot be restored by phantom; the banner tells you to inspect them. |
+| No pushes, no PRs | `git push` is denied, there is no network tool, and phantom has no push code path. Not configurable. |
+| Ctrl+C is a kill switch | Kills the Claude process tree, `git reset --hard` + `git clean -fd` on the fix branch, checks out your branch, pops the snapshot stash if any, exits 130. |
+| Dirty tree refused | Uncommitted changes → status `refused`, nothing happens. `--allow-dirty` stashes a snapshot (`git stash push -u -m "phantom-snapshot-<ts>"`) and pops it back once you are on your branch (also on Ctrl+C); with `--no-commit` it prints the exact `git stash pop`. `--dry-run` never needs a clean tree. |
+| Hard caps | `maxIterations` (3) bounds Claude invocations; `maxMinutes` (15) is a wall-clock timer that kills the child. |
+| Dry run | `--dry-run`: no branch, no edits (`Edit`/`MultiEdit` removed, writes rejected except the report). Diagnosis and proposed diff go into the report; the only writes are under `.phantom/`. |
+| Off switch | `PHANTOM_DISABLED=1` → pure passthrough. |
 
-| What phantom can see | What phantom can never do |
-|---|---|
-| Your repo's tracked and untracked source files, minus never-touch globs | Read, edit, or create a never-touch file through any tool call |
-| The last 256 KiB of your command's output, redacted | Push, open a PR, or use a network tool (`WebFetch`, `curl`, `wget`, …) |
-| `git log`, `git status`, `git diff` | Switch, reset, stash, or commit branches — phantom owns git |
-| `package.json` name and scripts | Install packages, run `npx`/`npm exec`, or run migrations |
-| The output of your test command | `rm -r`, `sudo`, `chmod -R`, `kill`, `docker`, `kubectl` |
-| Your environment variables (the session inherits your shell's env, like any CLI) | Commit to your branch |
+The session can see your tracked and untracked source (minus never-touch globs), the redacted last 256 KiB of output, read-only git history, `package.json` name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, run migrations, or commit to your branch.
 
-What it is **not**: a sandbox. The session may run `node` (it has to, to run your tests), and a `node -e` one-liner can in principle read any file your user can read or open a socket. The guard is lexical; the branch isolation, the post-session audit, and the fact that nothing is ever pushed are the real backstops. If you need hard isolation, run phantom inside a container.
+**Not a sandbox.** The session may run `node` (it has to, to run your tests), and a `node -e` one-liner can in principle read any file your user can read or open a socket. The guard is lexical; branch isolation, the post-session audit, and the no-push rule are the real backstops. Need hard isolation? Run phantom in a container.
 
-A note on the output tail: before the last 256 KiB of output is handed to the session, phantom runs it through a best-effort redactor (`KEY=value` pairs with secret-looking names, `Authorization` headers, `sk-`/`ghp_`/`AKIA`/`xox`-style tokens, JWTs, URL credentials, PEM blocks → `[REDACTED]`). It is a safety net, not a guarantee: if your app prints secrets at startup, fix that first.
-
-## Prerequisites
-
-- Node >= 18
-- git (phantom refuses to recover outside a git repository)
-- Claude Code CLI, installed and authenticated:
-
-  ```sh
-  npm install -g @anthropic-ai/claude-code
-  claude   # follow the login prompt once
-  ```
-
-Recovery runs `claude -p` under your account. It uses your Claude subscription or API billing, exactly as an interactive session would.
+**Redaction.** The output tail is scrubbed before the session sees it (`KEY=value` with secret-looking names, `Authorization` headers, `sk-`/`ghp_`/`AKIA`/`xox` tokens, JWTs, URL credentials, PEM blocks → `[REDACTED]`). Pattern-based, so a safety net, not a guarantee.
 
 ## What you get back
 
-Every recovery writes a markdown post-mortem to `.phantom/reports/`. This is a trimmed example from running `phantom npm start` in `examples/crash-demo`:
-
-```markdown
-# Post-mortem: TypeError: Cannot read properties of undefined (reading 'email')
-
-Status: ✅ FIXED    Branch: phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-Command: npm start  Exit: 1  Duration: 0.4s  Captured: 2026-08-20T18:41:07Z
-
-## Root cause
-`formatOrderLine` in `src/report.js:9` dereferences `order.customer.email`
-unconditionally. `data/orders.json` contains a guest checkout (`ord_1003`)
-with no `customer` object, so the report builder throws on boot before the
-HTTP server starts listening.
-
-## Blast radius
-- `buildReport` is called on startup and on every HTTP request, so any
-  guest order in the data set takes the whole service down, not just one line.
-- Existing tests only cover orders with a customer; the gap was untested.
-
-## Fix
-    --- a/src/report.js
-    +++ b/src/report.js
-    @@ -8,3 +8,3 @@ function formatOrderLine(order) {
-    -  const email = order.customer.email;
-    +  const email = order.customer?.email ?? '(guest)';
-       const total = orderTotal(order).toFixed(2);
-
-Regression test added: `test/report.test.js` → "formatOrderLine tolerates a
-guest order with no customer".
-
-## Verification (independent)
-| Step | Command | Result |
-|---|---|---|
-| Reproduce (new test, pre-fix) | npm test | ❌ 1 failed, 4 passed |
-| Verify (post-fix) | npm test | ✅ 5 passed |
-| Original command | npm start | ✅ exit 0 (server listening) |
-
-Iterations: 1/3  Wall clock: 1m 48s  Never-touch audit: clean
-Review: git diff main..phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-```
-
-The `## Verification (independent)` section and the metadata line are written by phantom, not by the session. If the session produces no report at all, phantom writes a fallback one with the crash context and whatever the session said.
-
-## Usage
-
-```
-phantom [flags] [--] <command> [args...]
-```
-
-The `--` is optional; the first token that is not a phantom flag starts your command.
-
-| Flag | Effect |
-|---|---|
-| `--dry-run` | Diagnose and propose a diff without creating a branch or editing files. |
-| `--allow-dirty` | Proceed with uncommitted changes after taking a stash snapshot. |
-| `--test <cmd>` | Test command for verification (overrides config and `package.json`). |
-| `--max-iterations <n>` | Cap on Claude invocations in the fix/verify loop (default 3). |
-| `--max-minutes <n>` | Wall-clock cap for the whole recovery (default 15). |
-| `--model <m>` | Passed through as `claude --model <m>`. |
-| `--no-commit` | Leave the fix uncommitted on the phantom branch. Phantom then stays on that branch (checking yours out would carry the changes over) and prints the way back. |
-| `--notify` | Desktop notification when a crash is detected and when recovery ends. See [Claude Code integration](#claude-code-integration). |
-| `--verbose` | Stream the session's progress lines in dim text. |
-| `--version` | Print the version and exit. |
-| `--help` | Print usage and exit. |
-
-Environment: `PHANTOM_DISABLED=1` disables recovery entirely (pure passthrough).
-
-**Exit codes.** Phantom always exits with your command's exit code. A clean exit is exit 0; a crash that phantom fixed is still exit 1 (or whatever your app returned). Phantom never masks a failure, so it is safe inside scripts and `&&` chains. If the command died from a signal, phantom exits `128 + signal number`, the same as a shell (`SIGSEGV` → 139, `SIGKILL` → 137). If you interrupt a recovery with Ctrl+C, phantom exits 130.
-
-## Configuration
-
-Phantom reads `.phantomrc` (JSON) from the git root, or a `"phantom"` key in `package.json`. CLI flags override both.
-
-**Precedence:** CLI flags > `.phantomrc` > `package.json` `"phantom"` key > defaults.
-
-Full `.phantomrc` with every key at its default:
-
-```jsonc
-{
-  "testCommand": "npm test",
-  "maxIterations": 3,
-  "maxMinutes": 15,
-  "neverTouch": [".env", ".env.*", "**/*.pem", "**/*.key", "**/secrets/**", "**/*.secret*"],
-  "webhook": null,
-  "notify": false,
-  "model": null,
-  "autoCommit": true,
-  "reportDir": ".phantom/reports",
-  "ringBufferBytes": 262144,
-  "claudeBin": "claude"
-}
-```
-
-| Key | Default | Meaning |
-|---|---|---|
-| `testCommand` | `"npm test"` if `package.json` has a `test` script, else `null` | Command phantom runs to verify the fix. With `null`, phantom still patches but cannot verify; the report says so. |
-| `maxIterations` | `3` | Hard cap on Claude invocations (initial + resumes). |
-| `maxMinutes` | `15` | Hard wall-clock cap for the whole recovery. |
-| `neverTouch` | see above | Globs the session may not read, edit, or create. `.git/**` and `node_modules/**` are always added and cannot be removed. |
-| `webhook` | `null` | URL to `POST` a JSON summary (status, branch, report path) on completion. Best-effort, 5 s timeout. |
-| `notify` | `false` | Desktop notification on crash and when recovery ends (same as `--notify`). |
-| `model` | `null` | Model name passed to `claude --model`. |
-| `autoCommit` | `true` | Commit a successful fix on the phantom branch. Never commits on yours. |
-| `reportDir` | `".phantom/reports"` | Where post-mortems go. Crash captures go to the sibling `crashes/` directory. |
-| `ringBufferBytes` | `262144` | Bytes of recent output kept for the crash context. |
-| `claudeBin` | `"claude"` | Claude Code executable. |
-
-The same keys work under `"phantom"` in `package.json`:
-
-```json
-{
-  "scripts": { "start": "node src/server.js", "test": "node --test" },
-  "phantom": { "maxMinutes": 10, "neverTouch": [".env", "config/prod/**"] }
-}
-```
-
-Setting `neverTouch` replaces the default list rather than extending it, so repeat any defaults you still want. `.git/**` and `node_modules/**` are always added and cannot be removed.
-
-## Reviewing a fix
-
-Phantom leaves you on your original branch with a banner like:
+A banner on your original branch:
 
 ```
 phantom: ✅ FIXED on phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
@@ -249,160 +136,140 @@ phantom: ✅ FIXED on phantom/fix-typeerror-cannot-read-properties-of-undefined-
   discard  git branch -D phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
 ```
 
-Read the report, read the diff, run the tests yourself, then merge or delete. Treat the branch like a PR from a fast contributor who has never seen your codebase before: usually right about the symptom, worth a second look on the shape of the fix.
+And a markdown post-mortem in `.phantom/reports/` (trimmed, from `examples/crash-demo`):
 
-Reports and crash captures live under `.phantom/`, which is gitignored by default. Commit them if you want a history.
+```markdown
+# Post-mortem: TypeError: Cannot read properties of undefined (reading 'email')
+Status: ✅ FIXED    Branch: phantom/fix-typeerror-…-k3f9a2    Command: npm start  Exit: 1
 
-## Claude Code integration
+## Root cause
+`formatOrderLine` in `src/report.js:9` dereferences `order.customer.email`
+unconditionally; `data/orders.json` has a guest checkout with no `customer`.
 
-Phantom runs in its own terminal, but you are probably chatting with Claude Code in another one. Three things connect them; each is optional and takes about a minute.
+## Blast radius
+`buildReport` runs on startup and on every request, so one guest order takes
+the whole service down. Existing tests only covered orders with a customer.
 
-| Integration | What you see | Setup |
-|---|---|---|
-| Plugin hooks | At the start of your next message in Claude Code: *👻 phantom: `npm run dev` crashed 3m ago — fixed on `phantom/fix-…`* | Install the plugin (below). |
-| Status line | A 👻 segment in Claude Code's status bar: `👻 fixing npm run dev…` → `👻 fixed npm run dev → phantom/fix-…` | Point `statusLine` at `phantom-status` (below). |
-| Desktop notification | A macOS/Linux notification the moment a crash is detected, and again when recovery ends | `phantom --notify …` or `"notify": true` in `.phantomrc`. |
+## Fix
+    -  const email = order.customer.email;
+    +  const email = order.customer?.email ?? '(guest)';
+Regression test added: test/report.test.js → "formatOrderLine tolerates a guest order".
 
-All three read the same file: `.phantom/events.jsonl`, which phantom appends to whenever it detects a crash or finishes a recovery. It lives in your repo root, is kept out of git via `.git/info/exclude` (never your `.gitignore`), is capped at 200 lines, and events older than 24 hours are ignored. Nothing is sent anywhere.
-
-### 1. Plugin: crash reports in your chat
-
-The repository doubles as a Claude Code plugin (`plugin/`). Inside Claude Code:
-
-```
-/plugin marketplace add waazy-w/claude-phantom
-/plugin install phantom@claude-phantom
-```
-
-Or, without the marketplace, from a checkout or an install:
-
-```sh
-claude --plugin-dir ./plugin
-claude --plugin-dir node_modules/claude-phantom/plugin
+## Verification (independent)
+| Step                          | Command   | Result                 |
+| Reproduce (new test, pre-fix) | npm test  | ❌ 1 failed, 4 passed   |
+| Verify (post-fix)             | npm test  | ✅ 5 passed             |
+| Original command              | npm start | ✅ exit 0               |
+Iterations: 1/3  Wall clock: 1m 48s  Never-touch audit: clean
 ```
 
-The plugin provides:
+The verification section and metadata are written by phantom, not the session. If the session produces no report, phantom writes a fallback with the crash context and whatever the session said. Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete. `.phantom/` is kept out of git via `.git/info/exclude`; commit it if you want a history.
 
-- **Hooks** (`UserPromptSubmit`, `SessionStart`) — before Claude sees your message, a tiny script checks `.phantom/events.jsonl` for events you have not been told about. If there are any, Claude is given a short briefing and asked to mention it in one or two lines, offer `git diff` / `git merge` for the fix branch and to open the report, and then carry on with whatever you asked. Each event is reported once. When there is nothing new the hook prints nothing and costs one file `stat`.
-- `/phantom:recover` — run the same recovery procedure interactively inside Claude Code, with you approving each step.
-- `crash-recovery` skill — the operating procedure itself (diagnose → failing test → minimal patch → verify → post-mortem). This file is the single source of truth; the headless prompt is generated from it.
+## Usage
 
-Check it is active with `/hooks` in Claude Code: you should see `phantom-events.js` under both events.
+```
+phantom [flags] [--] <command> [args...]
+```
 
-Claude Code cannot be interrupted from outside, so the message appears on your *next* turn, not the instant the crash happens. For instant notice use the status line or a desktop notification.
+Flags go before the command; everything after the command is passed through verbatim (`phantom npm run dev --verbose` gives `--verbose` to npm). `--` is optional.
 
-### 2. Status line: a 👻 that stays until you have seen it
-
-`phantom-status` (installed alongside `phantom`) prints one short line for Claude Code's status bar, or nothing when there is nothing to show:
-
-| State | Segment |
+| Flag | Effect |
 |---|---|
-| Crash detected, recovery running | `👻 fixing npm run dev…` |
-| Recovery fixed it | `👻 fixed npm run dev → phantom/fix-20260820-1432-customer` |
-| Recovery could not fix it | `👻 could not fix npm run dev` |
-| Dry run finished | `👻 dry run: npm run dev` |
-| Crashed, no recovery for 20+ min | `👻 npm run dev crashed 25m ago` |
+| `--dry-run` | Diagnose and propose a diff; no branch, no edits. |
+| `--allow-dirty` | Proceed with uncommitted changes after taking a stash snapshot. |
+| `--test <cmd>` | Verification command (overrides config and `package.json`). |
+| `--max-iterations <n>` | Cap on Claude invocations (default 3, max 10). |
+| `--max-minutes <n>` | Wall-clock cap for the recovery (default 15, max 120). |
+| `--model <m>` | Passed through as `claude --model <m>`. |
+| `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
+| `--notify` | Desktop notification on crash and when recovery ends. |
+| `--verbose` | Stream the session's progress lines. |
+| `--version`, `--help` | |
 
-Several unread events show as `(+N)`. The segment clears when the plugin hook reports the events in your chat, or when you run `phantom-status --mark-read`.
+**Exit codes.** Always your command's exit code — a fixed crash is still exit 1, so phantom is safe in scripts and `&&` chains. Signal deaths exit `128 + signal` like a shell (`SIGSEGV` → 139); Ctrl+C during recovery exits 130; invalid flags or config exit 2 before your command runs.
 
-**If you have no status line yet**, add this to `~/.claude/settings.json`:
+## Configuration
 
-```json
+`.phantomrc` (JSON) at the git root, or a `"phantom"` key in `package.json`. Precedence: flags > `.phantomrc` > `package.json` > defaults. Every key at its default:
+
+```jsonc
 {
-  "statusLine": { "type": "command", "command": "phantom-status" }
+  "testCommand": "npm test",      // auto: "npm test" if package.json has a test script, else null (patch but cannot verify)
+  "maxIterations": 3,             // hard cap on Claude invocations (initial + resumes)
+  "maxMinutes": 15,               // hard wall-clock cap
+  "neverTouch": [".env", ".env.*", "**/*.pem", "**/*.key", "**/secrets/**", "**/*.secret*"],
+                                  // replaces the default list (repeat what you keep); .git/** and node_modules/** are always added
+  "webhook": null,                // POST a JSON summary (status, branch, report) on completion; best-effort, 5 s timeout
+  "notify": false,                // same as --notify
+  "model": null,                  // claude --model
+  "autoCommit": true,             // commit a successful fix on the phantom branch (never on yours)
+  "reportDir": ".phantom/reports",// crash captures go to the sibling crashes/
+  "ringBufferBytes": 262144,      // output kept for crash context
+  "claudeBin": "claude"           // Claude Code executable
 }
 ```
 
-**If you already have one**, keep it and append phantom's segment. Copy [`examples/statusline.sh`](examples/statusline.sh) somewhere (say `~/.claude/statusline.sh`), set `BASE` inside it to your current status-line command, and point `statusLine.command` at the script. It reads Claude Code's JSON once and feeds it to both commands, so neither loses its input.
-
-The status line refreshes whenever Claude Code redraws (after each message, tool call, or permission prompt), so a crash that happens while you are reading will show up on the next redraw rather than instantly.
-
-### 3. Desktop notification: the instant it happens
-
-```sh
-phantom --notify npm run dev          # once
-echo '{ "notify": true }' > .phantomrc   # always, for this repo
+```json
+{ "phantom": { "maxMinutes": 10, "neverTouch": [".env", "config/prod/**"] } }
 ```
 
-You get one notification when the crash is detected (*👻 phantom: crash detected — `npm run dev` — TypeError: … — phantom is taking over*) and one when recovery ends (*👻 phantom: fixed — branch phantom/fix-…*).
+## Claude Code integration
 
-- **macOS** uses the built-in `osascript`; no setup. Those notifications carry the Script Editor icon because Apple does not let a script choose its own. To get the phantom logo instead, install [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+Phantom runs in its own terminal while you chat with Claude Code in another. Three optional bridges, all reading `.phantom/events.jsonl` (appended on every crash and recovery outcome, git-excluded, capped at 200 lines, events older than 24 h ignored, nothing sent anywhere):
 
-  ```sh
-  brew install terminal-notifier
-  ```
+| Bridge | What you see | When |
+|---|---|---|
+| Plugin hooks | Claude opens your next reply with *👻 phantom: `npm run dev` crashed 3m ago — fixed on `phantom/fix-…`*, offers `git diff`/`git merge` and the report, then continues with your request | Your next message |
+| Status line | `👻 fixing npm run dev…` → `👻 fixed npm run dev → phantom/fix-…` in Claude Code's status bar until seen | Next redraw (each message, tool call, prompt) |
+| Desktop notification | *👻 phantom: crash detected — npm run dev — TypeError …*, then *👻 phantom: fixed — branch …* | Instantly |
 
-  Phantom detects it on `PATH` and uses it automatically, with the phantom icon. The first notification may ask you to allow notifications from terminal-notifier in System Settings → Notifications.
-- **Linux** uses `notify-send` (package `libnotify-bin` on Debian/Ubuntu, `libnotify` on Fedora/Arch) with the phantom icon.
-- **Windows** is not supported yet; `--notify` is silently ignored there.
+Claude Code cannot be interrupted from outside, so the chat message is always on your next turn; use the status line or a notification for instant notice.
 
-Notifications are best-effort and time out after 4 seconds; they never delay or fail a recovery.
+**Plugin.** Inside Claude Code, `/plugin marketplace add waazy-w/claude-phantom` then `/plugin install phantom@claude-phantom` — or `claude --plugin-dir ./plugin` (or `node_modules/claude-phantom/plugin`). It ships the `UserPromptSubmit`/`SessionStart` hooks (each event reported once; silent and one `stat` when nothing is new — confirm with `/hooks`), `/phantom:recover` for interactive recovery with you approving each step, and the `crash-recovery` skill, which is the single source of truth the headless prompt is generated from.
 
-## Recording the demo GIF
+**Status line.** `phantom-status` (installed with `phantom`) prints one line or nothing. States: `👻 fixing <cmd>…` (crash < 20 min, recovery running), `👻 fixed <cmd> → <branch>`, `👻 could not fix <cmd>`, `👻 dry run: <cmd>`, `👻 <cmd> crashed 25m ago` (no recovery after 20 min); `(+N)` for several unread. It clears when the hook reports the events or after `phantom-status --mark-read`. No status line yet: `"statusLine": { "type": "command", "command": "phantom-status" }` in `~/.claude/settings.json`. Already have one: copy [`examples/statusline.sh`](examples/statusline.sh), set `BASE` to your current command, point `statusLine.command` at the script — it replays Claude Code's stdin JSON to both.
 
-`npm run demo` copies `examples/crash-demo` into a temporary git repository and runs `phantom npm start` inside it. The app crashes on a guest order with no `customer`; phantom recovers it in one or two iterations.
+**Desktop notification.** `phantom --notify …` or `"notify": true`. macOS uses built-in `osascript` (Script Editor icon, since Apple does not let scripts pick their own); `brew install terminal-notifier` and phantom switches to it automatically with the phantom icon (allow it once in System Settings → Notifications). Linux uses `notify-send` (`libnotify-bin` / `libnotify`) with the icon. Windows: silently ignored. Best-effort, 4 s timeout, never delays a recovery.
 
-With [VHS](https://github.com/charmbracelet/vhs), a ready tape is included:
+## Demo GIF
 
-```sh
-npm link                              # `phantom` on PATH from this checkout
-PHANTOM_REPO="$PWD" vhs docs/demo.tape
-```
-
-The tape sets up the temp repo in a hidden block, types `phantom npm start`, waits ~90 s for recovery, then shows `cat .phantom/reports/*.md | head -40`. Real recovery time varies, so adjust the `Sleep 90s` line if the GIF cuts off early or idles too long.
-
-With asciinema + agg:
-
-```sh
-cd "$(mktemp -d)" && cp -R "$OLDPWD/examples/crash-demo/." . && git init -q && git add -A && git commit -qm init
-asciinema rec -c "phantom npm start" demo.cast
-agg --speed 3 demo.cast demo.gif
-```
-
-Keep the final GIF under ~30 s: cut idle time with tighter `Sleep` values in the tape, use `Set PlaybackSpeed 2.0`, or `agg --speed`. Recovery spawns a real Claude session and bills your account.
+`npm run demo` copies `examples/crash-demo` into a temp git repo and runs `phantom npm start`; the app crashes on a guest order and phantom recovers it in one or two iterations (a real, billed session, ~90 s). Record it with [VHS](https://github.com/charmbracelet/vhs): `npm link && PHANTOM_REPO="$PWD" vhs docs/demo.tape` (adjust the tape's `Sleep 90s` to the real recovery time), or with asciinema: `asciinema rec -c "phantom npm start" demo.cast && agg --speed 3 demo.cast demo.gif` from a copy of the demo. Keep it under ~30 s.
 
 ## Known limitations
 
-- **Exit-based detection only.** Phantom notices when the process exits. Supervisors that swallow the crash and keep the parent alive (`nodemon`, `pm2`, `forever`, `--watch` modes) are not detected. Run the underlying command instead: `phantom node src/server.js`, not `phantom nodemon src/server.js`.
-- **git is required.** No repository, no recovery; phantom still passes the command through.
-- **Non-deterministic.** Claude may fail to fix the bug. Phantom then leaves the branch clearly marked unfixed (status `unfixed` or `timeout`), returns you to your branch, and the report documents what it tried and why verification failed.
-- **Uses your Claude billing.** Every recovery is a real session.
-- **Best on Node/JS projects with a test runner.** The patch step works for any language Claude Code can edit, but verification needs a `testCommand`, and the crash-context heuristics (stack-trace extraction, hint files) are tuned for Node traces first.
-- **Windows support is best-effort.** Developed and tested on macOS and Linux. Signal semantics and path matching on Windows are not covered by the test suite yet, and the guard hook is skipped there (shell quoting differs), leaving the permission deny rules and the post-session audit.
-- **No sandbox.** The allowlist, deny rules, and guard hook constrain *tool calls*, not what a `node` process can do once allowed. The session also inherits your environment variables. Treat phantom like any other CLI you run with your credentials, and use a container if that is not acceptable.
-- **Redaction is pattern-based.** The captured output tail is scrubbed of common secret shapes before it is stored or sent, but an unusual format will get through. Apps that print secrets at startup should stop doing that regardless.
-- **Never-touch files outside git cannot be restored.** If a gitignored `.env` changes during a session, phantom detects it (size/mtime/inode snapshot), discards the session's work, and tells you — but it cannot put the old contents back, because it never read them.
-- **Your app sees a pipe, not a TTY.** Tools that detect a TTY will drop colors or change output. Set `FORCE_COLOR=1` (or your tool's equivalent) if you want the colors back.
-- **Ctrl+C while phantom is running your test command** waits for that test run to finish if the signal is sent only to phantom's PID. A terminal Ctrl+C reaches the test process too, so it ends promptly in practice.
-- **A child that keeps stdout open keeps phantom waiting.** A daemonized server that inherits the pipe will hold the wrapper until the pipe closes; run foreground servers.
-- **A broken `.phantomrc` fails fast.** Invalid config exits 2 before your command runs, even for commands that would have succeeded.
+- **Exit-based detection only.** Supervisors that swallow the crash (`nodemon`, `pm2`, `forever`, `--watch`) are not detected; wrap the underlying command: `phantom node src/server.js`.
+- **git required.** Outside a repo phantom only passes the command through.
+- **Non-deterministic.** Claude may fail; the branch is then marked `unfixed`/`timeout`, you are back on your branch, and the report says what was tried and why verification failed.
+- **Uses your Claude billing** for every recovery.
+- **Best on Node/JS with a test runner.** Patching works for anything Claude Code can edit, but verification needs a `testCommand` and the crash heuristics are tuned for Node traces first.
+- **Windows is best-effort.** Developed and tested on macOS and Linux; signal semantics and path matching are untested there, and the guard hook is skipped (shell quoting differs), leaving deny rules and the audit.
+- **No sandbox** (see above) and the session inherits your environment variables.
+- **Redaction is pattern-based**; unusual secret formats get through.
+- **Never-touch files outside git cannot be restored** — phantom detects the change, discards the session's work, and tells you, but never read the old contents.
+- **Your app sees a pipe, not a TTY**; set `FORCE_COLOR=1` (or equivalent) to keep colours.
+- **Ctrl+C during the test run** waits for it if the signal reaches only phantom's PID; a terminal Ctrl+C reaches the test too.
+- **A child that keeps stdout open keeps phantom waiting** — run foreground servers, not daemons.
+- **A broken `.phantomrc` exits 2 before your command runs.**
 
 ## FAQ
 
-**Does it ever push?**
-No. `git push` is on the deny list, there is no network tool in the session, and phantom itself contains no code that pushes. There is no flag to enable it.
+**Does it ever push?** No — denied tool, no network tool, no push code path, no flag.
 
-**Can it touch my `.env`?**
-No. `.env` and `.env.*` are in the default `neverTouch` list, which is enforced as a permission deny rule during the session and as a diff audit after it. If the audit ever finds a never-touch file changed, the fix branch is hard-reverted and the report says so. Your app's own log output is the one thing to watch: phantom redacts common secret shapes from the captured tail before the session sees it, but the redactor is pattern-based and cannot know every format.
+**Can it touch my `.env`?** No: `.env`/`.env.*` are never-touch by default, enforced as deny rules, by the guard hook, and by the post-session audit that hard-reverts the branch on any hit. Watch your own log output: the redactor is pattern-based.
 
-**What if I'm mid-change?**
-Phantom refuses to recover on a dirty tree. If you want it anyway, `--allow-dirty` takes a stash snapshot first and prints the `git stash pop` command to restore your work. The snapshot is popped automatically if you Ctrl+C.
+**I'm mid-change.** Phantom refuses on a dirty tree; `--allow-dirty` stashes a snapshot first and restores it automatically (also on Ctrl+C).
 
-**How much does a recovery cost?**
-One to three headless Claude Code turns plus test runs, bounded by `maxIterations` and `maxMinutes`. For a small crash like the demo, expect something in the range of a short interactive debugging session. Set `maxIterations: 1` and a cheaper `model` if you want a hard ceiling.
+**How much does it cost?** One to three headless turns plus test runs, bounded by `maxIterations` and `maxMinutes`; roughly a short interactive debugging session. `maxIterations: 1` and a cheaper `model` give a hard ceiling.
 
-**Can I use it in CI?**
-Yes, with `--dry-run`: it writes a diagnosis and proposed diff to `.phantom/reports/` and never creates a branch or edits files, which is what you want from an unattended runner. Upload `.phantom/` as an artifact. Full fix mode also works in CI, but since nothing is pushed the branch vanishes with the runner, so there is little point.
+**CI?** Use `--dry-run`: diagnosis and proposed diff in `.phantom/reports/`, no branch, no edits; upload `.phantom/` as an artifact. Full mode works but the branch dies with the runner since nothing is pushed.
 
-**Does phantom slow my app down?**
-No measurable overhead: it is a child-process spawn with piped stdio and a bounded buffer. The 50 MB log-flood case is part of the test suite.
+**Overhead?** None measurable — a child-process spawn with piped stdio and a bounded buffer (a 50 MB log flood is in the test suite).
 
-**Can I run it from inside a Claude Code session?**
-Yes. Phantom strips the `CLAUDECODE` environment variable before spawning the headless session, so nesting works.
+**From inside Claude Code?** Yes; phantom strips `CLAUDECODE` from the environment before spawning the headless session, so nesting works.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: zero dependencies, tests for behaviour changes, and any change to the allowed-tools list or never-touch defaults needs a written justification.
+See [CONTRIBUTING.md](CONTRIBUTING.md): zero dependencies, tests for behaviour changes, and a written justification for any change to the allowed-tools list or never-touch defaults.
 
 ## License
 
