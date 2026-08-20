@@ -11,6 +11,7 @@
 | **Iterations** | {{iterations}} |
 | **Duration** | {{duration}} |
 | **Model / cost** | {{modelCost}} |
+| **Session** | {{session}} |
 | **Generated** | {{generatedAt}} |
 
 ## TL;DR

@@ -123,6 +123,7 @@ test('buildClaudeArgs produces a spawn argv with stdin prompt and resume support
   assert.equal(args[0], '-p');
   assert.ok(args.includes('--output-format') && args[args.indexOf('--output-format') + 1] === 'json');
   assert.ok(args.includes('dontAsk'));
+  assert.equal(args[args.indexOf('--setting-sources') + 1], 'project,local', 'user-level settings are not loaded');
   assert.ok(args.includes('--allowedTools'));
   assert.equal(args[args.indexOf('--allowedTools') + 2], 'Bash(npm test)');
   assert.ok(args.includes('--settings'));

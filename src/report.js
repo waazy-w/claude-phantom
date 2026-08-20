@@ -95,6 +95,11 @@ const code = (s) => '`' + String(s).replace(/`/g, '‵') + '`';
  * @param {{ claudeResult?: object|null, testOutput?: string|null, baseSha?: string|null, durationMs?: number }} [extra]
  * @returns {string}
  */
+/** Claude Code keeps the full transcript under ~/.claude/projects/; the id is how you find or reopen it. */
+function sessionCell(id) {
+  return id ? code(id) + ' — transcript in `~/.claude/projects/`, reopen with ' + code('claude --resume ' + id) : '(none)';
+}
+
 function fallbackReport(ctx, result, extra = {}) {
   const claude = extra.claudeResult || null;
   const baseBranch = (ctx.git && ctx.git.branch) || 'HEAD';
@@ -119,6 +124,7 @@ function fallbackReport(ctx, result, extra = {}) {
     '| **Iterations** | ' + (result.iterations || 0) + ' |',
     '| **Duration** | ' + formatDuration(extra.durationMs) + ' |',
     '| **Model / cost** | ' + modelCost + ' |',
+    '| **Session** | ' + sessionCell(claude && claude.session_id) + ' |',
     '| **Generated** | ' + new Date().toISOString() + ' |',
     '',
     '## TL;DR',
@@ -190,6 +196,7 @@ function appendVerification(markdown, info) {
     ['Iterations used', String(info.iterations || 0)],
     ['Wall clock', formatDuration(info.durationMs)],
     ['Cost', formatCost(info.costUsd)],
+    ['Session', sessionCell(info.sessionId)],
   ];
   if (info.restoreHint) rows.push(['Stashed changes', 'restore with ' + code(info.restoreHint)]);
   const section = [
@@ -224,5 +231,5 @@ function appendVerification(markdown, info) {
 
 module.exports = {
   renderTemplate, fallbackReport, appendVerification, trimLines, trimBytes, loadTemplate,
-  statusBadge, formatDuration, formatCost, VERIFICATION_MARKER, TEMPLATE_PATH,
+  statusBadge, formatDuration, formatCost, sessionCell, VERIFICATION_MARKER, TEMPLATE_PATH,
 };

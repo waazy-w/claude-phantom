@@ -176,11 +176,11 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const deadline = t0 + (Number(config.maxMinutes) || 15) * 60 * 1000;
   const s = {
     root: null, origRef: null, branch: null, baseSha: null, onPhantomBranch: false, stashed: false, child: null,
-    reportPath: null, aborted: false, cleanupPromise: null, signalHandlers: [], stayed: false, done: false,
+    reportPath: null, aborted: false, cleanupPromise: null, signalHandlers: [], stayed: false, done: false, sessionId: null,
   };
   let iterations = 0;
   let testsPassed = null;
-  const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message });
+  const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message, sessionId: s.sessionId || null });
 
   const removeSignalHandlers = () => {
     for (const [sig, h] of s.signalHandlers) process.removeListener(sig, h);
@@ -324,7 +324,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       lastClaude = res.json;
       if (typeof res.json.total_cost_usd === 'number') costUsd += res.json.total_cost_usd;
       if (res.timedOut) { timedOut = true; log.warn('claude session hit the ' + config.maxMinutes + ' minute cap'); break; }
-      if (res.json.session_id) sessionId = res.json.session_id;
+      if (res.json.session_id) { sessionId = res.json.session_id; s.sessionId = sessionId; log.verbose('claude session ' + sessionId); }
       if (res.json.is_error) log.warn('claude ended with an error: ' + String(res.json.result || res.json.subtype || '').split('\n')[0].slice(0, 200));
       log.verbose('claude turns=' + res.json.num_turns + ' cost=$' + (res.json.total_cost_usd || 0).toFixed(3) + ' subtype=' + res.json.subtype);
       const denials = Array.isArray(res.json.permission_denials) ? res.json.permission_denials : [];
@@ -405,7 +405,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const modelUsed = config.model || (lastClaude && lastClaude.modelUsage && Object.keys(lastClaude.modelUsage)[0]) || null;
     const modelCost = [modelUsed, report.formatCost(costUsd)].filter(Boolean).join(' · ');
     md = report.renderTemplate(md, {
-      iterations, duration: report.formatDuration(durationMs), modelCost, status: report.statusBadge(status),
+      iterations, duration: report.formatDuration(durationMs), modelCost, status: report.statusBadge(status), session: report.sessionCell(sessionId),
       branch: reportBranch || '(none)', baseSha: s.baseSha.slice(0, 10), baseBranch: ctx.git.branch, reportPath: s.reportPath,
       command: [ctx.command, ...ctx.args].join(' '), exitSummary: summarizeExit(ctx), generatedAt: new Date().toISOString(),
     });
@@ -414,7 +414,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = md.replace(/\*\*Status:\*\*[^\n]*/, '**Status:** ' + report.statusBadge(status) + ' (set by phantom: ' + message + ')');
     }
     md = report.appendVerification(md, {
-      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, costUsd: costUsd || null, changedFiles,
+      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, costUsd: costUsd || null, changedFiles, sessionId,
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
     });
     fs.writeFileSync(s.reportPath, md);
@@ -478,6 +478,7 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, costUsd }) {
     lines.push('');
     lines.push('report  ' + colors.cyan(path.relative(s.root, final.reportPath)));
   }
+  if (final.sessionId) lines.push('session ' + colors.dim(final.sessionId + '  (claude --resume ' + final.sessionId + ')'));
   if (restoreHint) lines.push(colors.yellow('your stashed changes: ' + restoreHint));
   const color = final.status === 'fixed' ? colors.green : final.status === 'dry-run' ? colors.cyan : colors.yellow;
   ui.banner(lines, { color });

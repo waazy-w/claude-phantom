@@ -133,6 +133,8 @@ test('failing tests resume the same session with feedback until green', async ()
   assert.ok(calls[1].promptBytes < calls[0].promptBytes / 4, 'resume prompt is short');
   assertCleanOriginal(repo);
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /Iterations used \| 2/);
+  assert.equal(res.sessionId, 'fake-session-1');
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /\| Session \| `fake-session-1` — transcript in `~\/.claude\/projects\/`, reopen with `claude --resume fake-session-1`/);
 });
 
 test('claude writes nothing: fallback report, unfixed, empty branch removed', async () => {

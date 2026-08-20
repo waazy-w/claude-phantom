@@ -27,6 +27,7 @@ const path = require('node:path');
  * @property {string|null} [branch] recovery only
  * @property {string|null} [report] recovery only, relative to the repo root
  * @property {string} [message] recovery only
+ * @property {string|null} [session] recovery only: Claude Code session id (`claude --resume <id>`)
  */
 
 const EVENTS_REL = path.join('.phantom', 'events.jsonl');
@@ -176,6 +177,7 @@ function recoveryEvent(ctx, final, root) {
     branch: final.branch || null,
     report: final.reportPath ? path.relative(root, final.reportPath).replace(/\\/g, '/') : null,
     message: final.message || '',
+    session: final.sessionId || null,
   };
 }
 

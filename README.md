@@ -116,6 +116,7 @@ Nothing here trusts the agent's own word: phantom runs your test command itself,
 | Dirty tree refused | Uncommitted changes → status `refused`, nothing happens. `--allow-dirty` stashes a snapshot (`git stash push -u -m "phantom-snapshot-<ts>"`) and pops it back once you are on your branch (also on Ctrl+C); with `--no-commit` it prints the exact `git stash pop`. `--dry-run` never needs a clean tree. |
 | Hard caps | `maxIterations` (3) bounds Claude invocations; `maxMinutes` (15) is a wall-clock timer that kills the child. |
 | Dry run | `--dry-run`: no branch, no edits (`Edit`/`MultiEdit` removed, writes rejected except the report). Diagnosis and proposed diff go into the report; the only writes are under `.phantom/`. |
+| Isolated settings | The session starts with `--setting-sources project,local`: your user-level `~/.claude/settings.json` (hooks, permission allows, env) is not loaded, so a global hook cannot rewrite or approve commands inside the recovery. Project `.claude/settings.json` still applies; phantom's own deny rules and guard hook are passed explicitly. |
 | Off switch | `PHANTOM_DISABLED=1` → pure passthrough. |
 
 The session can see your tracked and untracked source (minus never-touch globs), the redacted last 256 KiB of output, read-only git history, `package.json` name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, run migrations, or commit to your branch.
@@ -134,6 +135,7 @@ phantom: ✅ FIXED on phantom/fix-typeerror-cannot-read-properties-of-undefined-
   review   git diff main..phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
   merge    git merge phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
   discard  git branch -D phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
+  session  192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b  (claude --resume 192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b)
 ```
 
 And a markdown post-mortem in `.phantom/reports/` (trimmed, from `examples/crash-demo`):
@@ -141,6 +143,7 @@ And a markdown post-mortem in `.phantom/reports/` (trimmed, from `examples/crash
 ```markdown
 # Post-mortem: TypeError: Cannot read properties of undefined (reading 'email')
 Status: ✅ FIXED    Branch: phantom/fix-typeerror-…-k3f9a2    Command: npm start  Exit: 1
+Session: 192389b5-… — transcript in ~/.claude/projects/, reopen with `claude --resume 192389b5-…`
 
 ## Root cause
 `formatOrderLine` in `src/report.js:9` dereferences `order.customer.email`
@@ -163,7 +166,7 @@ Regression test added: test/report.test.js → "formatOrderLine tolerates a gues
 Iterations: 1/3  Wall clock: 1m 48s  Never-touch audit: clean
 ```
 
-The verification section and metadata are written by phantom, not the session. If the session produces no report, phantom writes a fallback with the crash context and whatever the session said. Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete. `.phantom/` is kept out of git via `.git/info/exclude`; commit it if you want a history.
+The verification section and metadata are written by phantom, not the session. The session id points at Claude Code's full transcript of the recovery (every tool call and file read) under `~/.claude/projects/`; `claude --resume <id>` reopens it so you can ask the session what it did. If the session produces no report, phantom writes a fallback with the crash context and whatever the session said. Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete. `.phantom/` is kept out of git via `.git/info/exclude`; commit it if you want a history.
 
 ## Usage
 

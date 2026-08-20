@@ -86,6 +86,8 @@ test('recoveryEvent stores the report path relative to the root', () => {
   assert.equal(ev.status, 'fixed');
   assert.equal(ev.report, '.phantom/reports/r.md');
   assert.equal(ev.branch, 'phantom/fix-x');
+  assert.equal(ev.session, null);
+  assert.equal(events.recoveryEvent(ctx, Object.assign({ sessionId: 'abc' }, final), root).session, 'abc');
 });
 
 test('describeEvent and timeAgo produce the shared one-liners', () => {

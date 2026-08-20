@@ -15,7 +15,7 @@ const RESUME_MAX_TURNS = 40;
 const DEFAULT_INNER_ATTEMPTS = 3;
 
 /** Placeholders Claude must leave for phantom to fill after the session. */
-const PHANTOM_FILLS = ['iterations', 'duration', 'modelCost'];
+const PHANTOM_FILLS = ['iterations', 'duration', 'modelCost', 'session'];
 
 const BASH_DENY = [
   'Bash(git push *)', 'Bash(git checkout *)', 'Bash(git switch *)', 'Bash(git reset *)', 'Bash(git stash *)',
@@ -244,7 +244,10 @@ function buildSettings(config, guardEnvJson, hookScriptPath = path.join(__dirnam
  * @returns {string[]}
  */
 function buildClaudeArgs(opts) {
-  const args = ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk'];
+  // project,local only: user-level hooks, allows, and env must not leak into the
+  // recovery session (a global PreToolUse hook that rewrites commands would
+  // otherwise trip the allowlist). Phantom's own --settings still apply.
+  const args = ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk', '--setting-sources', 'project,local'];
   args.push('--max-turns', String(opts.maxTurns || (opts.resumeSessionId ? RESUME_MAX_TURNS : DEFAULT_MAX_TURNS)));
   if (opts.model) args.push('--model', opts.model);
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
