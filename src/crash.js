@@ -2,6 +2,7 @@
 
 const os = require('node:os');
 const path = require('node:path');
+const { stripAnsi } = require('./ansi');
 
 /** @typedef {import('./watcher').RunResult} RunResult */
 
@@ -125,7 +126,7 @@ function extractFilePaths(text, opts = {}) {
   };
   const generic = /((?:file:\/\/)?(?:[A-Za-z]:)?[^\s()"'<>[\]:,]{1,1024}\.[A-Za-z0-9]{1,8}):(\d+)(?::\d+)?/g;
   const python = /File "([^"]{1,1024})", line \d+/g;
-  const scan = String(text || '').split('\n').filter((l) => l.length <= MAX_SCAN_LINE).join('\n');
+  const scan = stripAnsi(text).split('\n').filter((l) => l.length <= MAX_SCAN_LINE).join('\n');
   let m;
   while ((m = python.exec(scan)) !== null) add(m[1]);
   while ((m = generic.exec(scan)) !== null) add(m[1]);
@@ -139,7 +140,7 @@ function extractFilePaths(text, opts = {}) {
  * @returns {{ stackTrace: string|null, errorLine: string|null, hintFiles: string[] }}
  */
 function extractStackTrace(text, opts = {}) {
-  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const lines = stripAnsi(text).replace(/\r\n?/g, '\n').split('\n');
   let headerIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (HEADER_RE.test(lines[i])) { headerIdx = i; break; }

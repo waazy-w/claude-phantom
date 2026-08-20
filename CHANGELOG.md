@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `phantom-status`: a status-line segment (👻 fixing / fixed / crashed) for Claude Code, plus `examples/statusline.sh` to combine it with an existing status line.
 - `--notify` flag / `notify` config key: desktop notification on crash and when recovery ends (macOS `osascript`, or `terminal-notifier` with the phantom icon when installed; Linux `notify-send`).
 - Brand kit in `brand/`: green phantom mark, wordmark, favicon, social preview, and `BRAND.md`.
+- Terminal escape sequences are stripped from the captured output before anything reads it,
+  so colourised child processes (`FORCE_COLOR`, CI runners, test frameworks) cannot corrupt
+  hint-file paths, the error line, the branch slug, or the post-mortem — and cannot hide a
+  secret from the redactor by splitting it mid-token.
 - Post-mortem and completion banner include the Claude Code session id (`claude --resume <id>`).
 - The recovery session loads only project and local settings (`--setting-sources project,local`): user-level hooks, permission allows, installed plugins, and their MCP servers are not loaded into it. Phantom's own deny rules and guard hook still apply.
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.

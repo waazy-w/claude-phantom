@@ -96,3 +96,24 @@ test('secrets in the output are scrubbed at the source (tail, stack trace, error
   assert.deepStrictEqual(ctx.hintFiles, ['src/app.js']);
   assert.ok(ctx.tail.includes('[REDACTED]'));
 });
+
+test('terminal escapes are stripped before redaction, parsing and slugging', () => {
+  const dir = repo();
+  fs.writeFileSync(path.join(dir, 'app.js'), 'x\n');
+  const E = '\x1b[31m';
+  const R = '\x1b[39m';
+  // A colour code in the middle of the token must not hide it from the redactor.
+  const tail = [
+    E + 'ANTHROPIC_API_KEY' + R + '=sk-ant-' + E + 'abcdefghijklmnopqrstuvwxyz0123456789' + R,
+    E + 'TypeError' + R + ': kaboom',
+    '    at explode (' + E + path.join(dir, 'app.js') + R + ':1:7)',
+  ].join('\n') + '\n';
+  const ctx = gatherContext(runResult(dir, tail), loadConfig(dir));
+  assert.ok(!ctx.tail.includes('\x1b'), 'tail carries no escapes');
+  assert.ok(!ctx.tail.includes('abcdefghijklmnopqrstuvwxyz0123456789'), 'the split secret is still redacted');
+  assert.ok(ctx.redactions >= 1);
+  assert.strictEqual(ctx.errorLine, 'TypeError: kaboom');
+  assert.deepStrictEqual(ctx.hintFiles, ['app.js']);
+  assert.strictEqual(ctx.slug, 'typeerror-kaboom');
+  assert.ok(!ctx.stackTrace.includes('\x1b'));
+});

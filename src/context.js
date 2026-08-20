@@ -6,6 +6,7 @@ const crash = require('./crash');
 const git = require('./git');
 const { isNeverTouch } = require('./never-touch');
 const { redact } = require('./redact');
+const { stripAnsi } = require('./ansi');
 
 /** @typedef {import('./watcher').RunResult} RunResult */
 /** @typedef {import('./config').Config} Config */
@@ -69,7 +70,9 @@ function gitInfo(cwd) {
  */
 function gatherContext(runResult, config) {
   const cwd = runResult.cwd || process.cwd();
-  const scrubbed = redact(runResult.tail || '');
+  // Strip escapes before redacting: a colour code inside a token would hide it
+  // from the secret patterns, and every consumer of the tail wants plain text.
+  const scrubbed = redact(stripAnsi(runResult.tail));
   const tail = scrubbed.text;
   const info = gitInfo(cwd);
   const base = info ? info.root : cwd;

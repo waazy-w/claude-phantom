@@ -145,3 +145,14 @@ test('SIGTERM to phantom is forwarded too', async () => {
   assert.strictEqual(r.userInterrupted, true);
   assert.strictEqual(r.signal, 'SIGTERM');
 });
+
+test('a colourised child stack still yields clean hint files (FORCE_COLOR)', async () => {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-color-'));
+  const script = path.join(dir, 'boom.js');
+  fs.writeFileSync(script, 'function explode() { throw new TypeError("kaboom"); }\nexplode();\n');
+  const r = await run([script], { cwd: dir, env: { ...process.env, FORCE_COLOR: '3', NO_COLOR: undefined } });
+  assert.ok(r.tail.includes('\x1b['), 'the child really did emit escapes');
+  const { errorLine, hintFiles } = extractStackTrace(r.tail, { cwd: dir });
+  assert.strictEqual(errorLine, 'TypeError: kaboom');
+  assert.deepStrictEqual(hintFiles, ['boom.js']);
+});

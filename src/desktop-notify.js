@@ -2,14 +2,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { ANSI_RE } = require('./ansi');
 
 const DEFAULT_TIMEOUT_MS = 4000;
 const MAX_MESSAGE_CHARS = 200;
 const GROUP = 'claude-phantom';
 const APP_NAME = 'phantom';
 
-// CSI sequences (colours, cursor moves) and OSC sequences (hyperlinks, titles).
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 /**
  * Resolve a binary on PATH without shelling out. Mirrors `command -v`:
