@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--notify` flag / `notify` config key: desktop notification on crash and when recovery ends (macOS `osascript`, or `terminal-notifier` with the phantom icon when installed; Linux `notify-send`).
 - Brand kit in `brand/`: green phantom mark, wordmark, favicon, social preview, and `BRAND.md`.
 - Post-mortem and completion banner include the Claude Code session id (`claude --resume <id>`).
-- The recovery session loads only project and local settings (`--setting-sources project,local`), so user-level hooks and permissions cannot leak into it.
+- The recovery session loads only project and local settings (`--setting-sources project,local`): user-level hooks, permission allows, installed plugins, and their MCP servers are not loaded into it. Phantom's own deny rules and guard hook still apply.
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
