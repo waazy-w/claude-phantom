@@ -66,10 +66,14 @@ test('does not retain memory: RSS and live ArrayBuffers stay flat across 50 MB',
         if (i % 64 === 63) global.gc();
       }
     };
+    // Collect immediately before each sample: chunks pushed since the loop's
+    // last gc() are dead but not yet freed, and counting them measures V8's
+    // collection timing rather than what the ring retains.
+    const measure = () => { global.gc(); return process.memoryUsage(); };
     pass();
-    const before = process.memoryUsage();
+    const before = measure();
     pass();
-    const after = process.memoryUsage();
+    const after = measure();
     process.stdout.write(JSON.stringify({ size: rb.size, rss: after.rss - before.rss, ab: after.arrayBuffers - before.arrayBuffers }));
   `;
   const out = execFileSync(process.execPath, ['--expose-gc', '-e', script], { encoding: 'utf8' });
