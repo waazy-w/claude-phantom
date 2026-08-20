@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `docs/make-demo-gif.js`: renders `docs/demo.gif` from the `docs/demo.mp4` master that
+  `docs/demo.tape` records. It caps every visually static span (found with ffmpeg's
+  `freezedetect`) so the long wait while Claude works is compressed while the readable
+  parts stay at real speed. Recording costs plan usage; re-rendering is free.
+
+### Changed
+
+- `docs/demo.tape` records an MP4 master rather than a GIF, and waits well past a normal
+  recovery instead of a fixed 90 s that could cut a slow run off mid-session.
+- The README no longer describes the demo as a "billed" session: with a Pro/Max login it
+  draws on the plan's usage allowance, and the `total_cost_usd` phantom prints is Claude
+  Code's API-rate estimate, not a charge.
+
 ## [0.1.0] - 2026-08-20
 
 ### Added

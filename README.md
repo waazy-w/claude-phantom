@@ -16,6 +16,8 @@ An autonomous crash-recovery agent for your terminal. Run your app through `phan
 
 <!-- Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape` (see "Demo GIF" below). -->
 
+![phantom recovering a crashed Node service: the app throws, phantom opens a fix branch, patches it, runs the tests itself, and writes a post-mortem](docs/demo.gif)
+
 ## Setup
 
 **You need:** Node >= 18, git (phantom only recovers inside a git repository), and the Claude Code CLI, logged in:
@@ -235,7 +237,7 @@ Claude Code cannot be interrupted from outside, so the chat message is always on
 
 ## Demo GIF
 
-`npm run demo` copies `examples/crash-demo` into a temp git repo and runs `phantom npm start`; the app crashes on a guest order and phantom recovers it in one or two iterations (a real, billed session, ~90 s). Record it with [VHS](https://github.com/charmbracelet/vhs): `npm link && PHANTOM_REPO="$PWD" vhs docs/demo.tape` (adjust the tape's `Sleep 90s` to the real recovery time), or with asciinema: `asciinema rec -c "phantom npm start" demo.cast && agg --speed 3 demo.cast demo.gif` from a copy of the demo. Keep it under ~30 s.
+`npm run demo` copies `examples/crash-demo` into a temp git repo and runs `phantom npm start`; the app crashes on a guest order and phantom recovers it in one or two iterations. It is a real Claude Code session (~90 s), so it consumes your plan's usage allowance — or API credit if `ANTHROPIC_API_KEY` is set. To re-record the demo: `npm link && PHANTOM_REPO="$PWD" vhs docs/demo.tape` writes an MP4 master, then `bash docs/make-demo-gif.sh` renders `docs/demo.gif` from it (compressing only the stretch where Claude is working, so the GIF stays ~25 s). Rendering is free and repeatable; only the recording costs usage.
 
 ## Known limitations
 
