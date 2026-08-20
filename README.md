@@ -15,7 +15,6 @@ An autonomous crash-recovery agent for your terminal. Run your app through `phan
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-success.svg)](package.json)
 
 <!-- Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape` (see "Demo GIF" below). -->
-![phantom demo](docs/demo.gif)
 
 ## Setup
 
