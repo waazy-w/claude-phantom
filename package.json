@@ -1,0 +1,56 @@
+{
+  "name": "claude-phantom",
+  "version": "0.1.0",
+  "description": "Autonomous crash-recovery agent for your terminal. Wrap any command; if it crashes, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies, and leaves a post-mortem.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "crash",
+    "recovery",
+    "debugging",
+    "ai",
+    "agent",
+    "cli",
+    "post-mortem",
+    "self-healing"
+  ],
+  "homepage": "https://github.com/waazy-w/claude-phantom#readme",
+  "bugs": {
+    "url": "https://github.com/waazy-w/claude-phantom/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/waazy-w/claude-phantom.git"
+  },
+  "license": "MIT",
+  "author": "saaz",
+  "main": "src/cli.js",
+  "bin": {
+    "phantom": "bin/phantom.js",
+    "phantom-status": "bin/phantom-status.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "plugin",
+    "templates",
+    "examples",
+    "brand/png/favicon-512.png",
+    "brand/phantom-mark.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js",
+    "lint": "node --check bin/phantom.js && node -e \"require('./src/cli.js')\"",
+    "demo": "bash examples/crash-demo/setup-demo.sh",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+
+# phantom's own working directory: crash captures and post-mortem reports
+# live here (.phantom/crashes/, .phantom/reports/). Commit them deliberately
+# if you want a history; by default they stay local.
+.phantom/
+
+.DS_Store
+*.log
+.env
+.env.*

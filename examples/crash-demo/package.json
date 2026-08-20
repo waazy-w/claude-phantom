@@ -1,0 +1,17 @@
+{
+  "name": "phantom-crash-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A tiny order-report service with a deliberate crash bug, used to demo claude-phantom.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "phantom": {
+    "testCommand": "npm test",
+    "maxIterations": 3,
+    "maxMinutes": 10
+  },
+  "license": "MIT"
+}

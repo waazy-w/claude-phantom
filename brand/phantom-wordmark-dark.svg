@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 128" width="440" height="128" role="img" aria-label="claude-phantom">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5CF0B4"/>
+      <stop offset="1" stop-color="#1FC985"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <g transform="translate(0 0) scale(.5)">
+  <path fill="#2EE59D" opacity=".45" filter="url(#glow)" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/>
+  <path fill="url(#body)" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/>
+  <rect x="96" y="98" width="22" height="40" rx="11" fill="#0B1210"/>
+  <rect x="138" y="98" width="22" height="40" rx="11" fill="#0B1210"/>
+  <rect x="100" y="104" width="6" height="12" rx="3" fill="#E8FFF4" opacity=".9"/>
+  <rect x="142" y="104" width="6" height="12" rx="3" fill="#E8FFF4" opacity=".9"/>
+  </g>
+  <text x="136" y="86" font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="64" font-weight="700" fill="#F3FBF7" letter-spacing="-2">phantom</text>
+  <text x="138" y="112" font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="17" font-weight="500" fill="#2EE59D" letter-spacing="2">CLAUDE-PHANTOM</text>
+</svg>

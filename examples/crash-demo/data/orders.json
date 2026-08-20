@@ -1,0 +1,6 @@
+[
+  { "id": "ord_1001", "customer": { "name": "Ada Lovelace", "email": "ada@example.com" }, "items": [{ "sku": "BOOK-1", "qty": 2, "price": 12.5 }] },
+  { "id": "ord_1002", "customer": { "name": "Grace Hopper", "email": "grace@example.com" }, "items": [{ "sku": "CABLE-9", "qty": 1, "price": 9.99 }, { "sku": "BOOK-1", "qty": 1, "price": 12.5 }] },
+  { "id": "ord_1003", "items": [{ "sku": "GUEST-PASS", "qty": 1, "price": 0 }] },
+  { "id": "ord_1004", "customer": { "name": "Linus Torvalds", "email": "linus@example.com" }, "items": [] }
+]

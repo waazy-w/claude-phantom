@@ -1,0 +1,9 @@
+{
+  "name": "phantom",
+  "version": "0.1.0",
+  "description": "Crash recovery procedure for Claude Code: diagnose, write a failing test, patch minimally, verify, write a post-mortem.",
+  "author": { "name": "claude-phantom contributors" },
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "hooks": "./hooks/hooks.json"
+}
