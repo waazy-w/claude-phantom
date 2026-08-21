@@ -446,7 +446,13 @@ test('buildClaudeEnv defaults to the current environment', () => {
   try {
     const env = buildClaudeEnv();
     assert.ok(!('CLAUDECODE' in env), 'nested-session marker stripped from the inherited env');
-    assert.equal(env.PATH, process.env.PATH, 'the rest of the environment is inherited');
+    // process.env is case-insensitive on Windows, but a spread copy of it is a
+    // plain object and is not: the key there is `Path`, so env.PATH is undefined.
+    // That is fine for the real caller -- spawn resolves env names
+    // case-insensitively on Windows -- so look the key up the way the copy holds it.
+    const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path');
+    assert.ok(pathKey, 'a PATH survived the copy');
+    assert.equal(env[pathKey], process.env.PATH, 'the rest of the environment is inherited');
   } finally {
     if (restore === undefined) delete process.env.CLAUDECODE; else process.env.CLAUDECODE = restore;
   }
