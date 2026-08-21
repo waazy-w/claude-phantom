@@ -698,11 +698,11 @@ footer a:hover { color: var(--accent-text); }
         <p class="cta-note rv" style="margin-top:10px;text-align:left">or <a href="#install">install from GitHub</a> — <code>npm i -g github:waazy-w/claude-phantom</code></p>
 
         <div class="badges rv">
-          <span class="badge">v<b>0.2.0</b></span>
+          <span class="badge">v<b>0.3.0</b></span>
           <span class="badge">dependencies <b>0</b></span>
           <span class="badge">node <b>&gt;=18</b></span>
           <span class="badge">MIT</span>
-          <span class="badge">210 tests</span>
+          <span class="badge">225 tests</span>
         </div>
       </div>
 
@@ -1025,7 +1025,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
       <div><b>git required</b>Outside a repo, phantom only passes the command through.</div>
       <div><b>non-deterministic</b>Claude may fail. The branch is marked <code>unfixed</code> or <code>timeout</code>, you're back on your branch, and the report says what was tried.</div>
       <div><b>best on node/js</b>Patching works anywhere Claude Code can edit, but verification needs a test command and the crash heuristics are tuned for Node traces first.</div>
-      <div><b>windows is best-effort</b>Developed and tested on macOS and Linux. Signal semantics and path matching are untested; the guard hook is skipped, leaving deny rules and the audit.</div>
+      <div><b>windows has two gaps</b>The full suite runs on windows-latest in CI, on node 18/20/22/24. Six tests skip: libuv maps every signal onto TerminateProcess, so a killed child reports no signal and a handler cannot run. The guard hook is skipped — its command is a POSIX shell line — leaving the deny rules and the audit. And phantom wraps programs, not shell lines, so <code>phantom dir</code> and other cmd built-ins are not wrapped, the same as on POSIX.</div>
       <div><b>not a sandbox</b>The session inherits your environment variables and can run <code>node</code>.</div>
       <div><b>redaction is pattern-based</b>Unusual secret formats get through.</div>
       <div><b>your app sees a pipe, not a TTY</b>Set <code>FORCE_COLOR=1</code> or equivalent to keep colours.</div>
@@ -1159,7 +1159,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   <div class="wrap" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;width:100%">
     <div class="ghost-note">
       <svg viewBox="0 0 256 256" aria-hidden="true"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
-      <span>claude-phantom 0.2.0 — MIT</span>
+      <span>claude-phantom 0.3.0 — MIT</span>
     </div>
     <nav>
       <a href="https://github.com/waazy-w/claude-phantom">github</a>
