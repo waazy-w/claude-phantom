@@ -212,7 +212,7 @@ function shellSingleQuote(s) {
  * @param {import('./config').Config} config
  * @param {string} guardEnvJson JSON for PHANTOM_GUARD
  * @param {string} [hookScriptPath]
- * @param {{ platform?: string, warn?: (msg: string) => void }} [opts]
+ * @param {{ platform?: string, warn?: (msg: string) => void, guardFilePath?: string }} [opts]
  * @returns {{ permissions: { deny: string[] }, hooks?: object }}
  */
 function buildSettings(config, guardEnvJson, hookScriptPath = path.join(__dirname, 'guard-hook.js'), opts = {}) {
@@ -223,11 +223,20 @@ function buildSettings(config, guardEnvJson, hookScriptPath = path.join(__dirnam
   deny.push(...BASH_DENY);
   const settings = { permissions: { deny: [...new Set(deny)] } };
   const platform = opts.platform || process.platform;
+  let command;
   if (platform === 'win32') {
-    if (opts.warn) opts.warn('guard hook skipped on Windows; relying on permission rules only');
-    return settings;
+    // cmd.exe has no `VAR=value cmd` prefix, so the payload goes in a file and
+    // the hook reads it from argv. Without a path to write to there is nothing
+    // to register, and the deny rules above are all that is left -- they cover
+    // the file tools but NOT Bash, so `cat .env` would be unguarded.
+    if (!opts.guardFilePath) {
+      if (opts.warn) opts.warn('guard hook skipped: no guard file path; permission rules do not cover Bash reads');
+      return settings;
+    }
+    command = [process.execPath, hookScriptPath, opts.guardFilePath].map((a) => '"' + a + '"').join(' ');
+  } else {
+    command = 'PHANTOM_GUARD=' + shellSingleQuote(guardEnvJson) + ' ' + shellSingleQuote(process.execPath) + ' ' + shellSingleQuote(hookScriptPath);
   }
-  const command = 'PHANTOM_GUARD=' + shellSingleQuote(guardEnvJson) + ' ' + shellSingleQuote(process.execPath) + ' ' + shellSingleQuote(hookScriptPath);
   settings.hooks = {
     PreToolUse: [{
       matcher: 'Bash|Edit|Write|MultiEdit|Read|NotebookEdit|Grep|Glob',

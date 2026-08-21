@@ -335,7 +335,16 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let testCommand = resolveTestCommand(s.root, config, ctx);
     const maxAttempts = Math.max(1, Number(config.maxIterations) || 1);
     const guard = { neverTouch: config.neverTouch, cwd: s.root, dryRun, testCommand, reportPath: s.reportPath };
-    const settings = prompt.buildSettings(config, JSON.stringify(guard), hooks.hookScriptPath || path.join(__dirname, 'guard-hook.js'), { warn: log.warn });
+    const guardJson = JSON.stringify(guard);
+    // Windows cannot carry the payload in an env prefix, so it goes in a file
+    // beside the reports (already git-excluded). Written only where it is used,
+    // so nothing changes for macOS and Linux.
+    let guardFilePath;
+    if (process.platform === 'win32') {
+      guardFilePath = path.join(reportDirAbs, '.guard.json');
+      try { fs.writeFileSync(guardFilePath, guardJson); } catch { guardFilePath = undefined; }
+    }
+    const settings = prompt.buildSettings(config, guardJson, hooks.hookScriptPath || path.join(__dirname, 'guard-hook.js'), { warn: log.warn, guardFilePath });
     const allowedTools = prompt.buildAllowedTools(config, { dryRun, testCommand });
     const disallowedTools = prompt.buildDisallowedTools();
     const env = prompt.buildClaudeEnv(baseEnv);
@@ -345,7 +354,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let tokens = 0;
     let cached = 0;
     let repro = null;
-    const reproTimeoutMs = Number(opts.reproTimeoutMs) > 0 ? Number(opts.reproTimeoutMs) : REPRO_TIMEOUT_MS;
+    const reproTimeoutMs = Number(hooks.reproTimeoutMs) > 0 ? Number(hooks.reproTimeoutMs) : REPRO_TIMEOUT_MS;
     let timedOut = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -421,6 +430,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     // never-touch files git cannot see (a gitignored .env).
     let changedFiles = [];
     let violations = [];
+    if (guardFilePath) { try { fs.unlinkSync(guardFilePath); } catch { /* already gone */ } }
     const snapDiff = audit.diffSnapshots(neverTouchBefore, audit.snapshotNeverTouch(s.root, config.neverTouch, { skipPrefixes: [phantomDir] }));
     // A tracked file that changed on disk is put back by the hard reset below,
     // so it is a violation but not a loss. Only a file git never knew about --
@@ -505,7 +515,10 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     if (s.onPhantomBranch) {
       if (git.isDirty(opts)) {
         s.stayed = true;
-        log.warn('leaving you on ' + s.branch + ' with uncommitted changes (--no-commit); go back with: git stash && git checkout ' + s.origRef);
+        const why = config.autoCommit === false ? '--no-commit'
+          : violations.length ? 'never-touch violation, nothing was committed'
+          : 'commit failed';
+        log.warn('leaving you on ' + s.branch + ' with uncommitted changes (' + why + '); go back with: git stash && git checkout ' + s.origRef);
       } else if (git.checkout(s.origRef, opts)) {
         s.onPhantomBranch = false;
         if (!changedFiles.length && !committed) {

@@ -100,22 +100,41 @@ function timeAgo(iso, now) {
   return Math.floor(h / 24) + 'd ago';
 }
 
+/**
+ * One line of text from an event field.
+ *
+ * Two hazards, both fixed here. A corrupt or hand-written log can hold a value
+ * that throws on coercion ({"command": {"toString": null}} raises "Cannot
+ * convert object to primitive value"); that used to escape describeEvent, and
+ * because the throw came before markRead the cursor never advanced, so every
+ * later prompt in that repo retried and failed the same way. And `error` is one
+ * raw line of the crashed program's output -- which may come from a dependency
+ * or a server response, not the user -- so a newline in it would forge extra
+ * lines in a briefing Claude reads as structure.
+ */
+function oneLine(value) {
+  let text;
+  try { text = String(value); } catch { return '?'; }
+  return text.replace(/\s*[\r\n]+\s*/g, ' ');
+}
+
 /** Same one-liner as src/events.js describeEvent. */
 function describeEvent(ev, now) {
   const when = timeAgo(ev.at, now);
+  const cmd = oneLine(ev.command);
   if (ev.type === 'crash') {
-    const why = ev.signal ? 'died from ' + ev.signal : 'exit ' + (ev.exit === null || ev.exit === undefined ? '?' : ev.exit);
-    return '`' + ev.command + '` crashed ' + when + ' (' + why + ')' + (ev.error ? ' — ' + ev.error : '');
+    const why = ev.signal ? 'died from ' + oneLine(ev.signal) : 'exit ' + (ev.exit === null || ev.exit === undefined ? '?' : oneLine(ev.exit));
+    return '`' + cmd + '` crashed ' + when + ' (' + why + ')' + (ev.error ? ' — ' + oneLine(ev.error) : '');
   }
   const head = {
-    fixed: 'fixed `' + ev.command + '`',
-    'dry-run': 'proposed a fix for `' + ev.command + '` (dry run)',
-    unfixed: 'could not fix `' + ev.command + '`',
-    aborted: 'recovery of `' + ev.command + '` was aborted',
-  }[ev.status] || ('recovery of `' + ev.command + '` ended: ' + ev.status);
+    fixed: 'fixed `' + cmd + '`',
+    'dry-run': 'proposed a fix for `' + cmd + '` (dry run)',
+    unfixed: 'could not fix `' + cmd + '`',
+    aborted: 'recovery of `' + cmd + '` was aborted',
+  }[ev.status] || ('recovery of `' + cmd + '` ended: ' + oneLine(ev.status));
   const parts = [head + ' ' + when];
-  if (ev.branch) parts.push('branch ' + ev.branch);
-  if (ev.report) parts.push('report ' + ev.report);
+  if (ev.branch) parts.push('branch ' + oneLine(ev.branch));
+  if (ev.report) parts.push('report ' + oneLine(ev.report));
   return parts.join(' · ');
 }
 
@@ -134,7 +153,14 @@ function readStdin() {
   return new Promise((resolve) => {
     let data = '';
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(data); } };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      // Without process.exit() the stdin handle would hold the process open
+      // whenever the caller never closes it.
+      try { process.stdin.pause(); process.stdin.unref(); } catch { /* not a pipe */ }
+      resolve(data);
+    };
     if (process.stdin.isTTY) return done();
     setTimeout(done, STDIN_TIMEOUT_MS).unref();
     process.stdin.setEncoding('utf8');
@@ -164,14 +190,25 @@ async function main() {
   if (!unread.length) return;
   const hookEventName = typeof input.hook_event_name === 'string' && input.hook_event_name ? input.hook_event_name : 'UserPromptSubmit';
   const out = { hookSpecificOutput: { hookEventName, additionalContext: buildContext(root, unread, now) } };
-  process.stdout.write(JSON.stringify(out) + '\n');
-  markRead(root, events);
+  // stdout is a pipe, so a payload past the pipe buffer (~64 KiB -- one minified
+  // stack trace in `error` does it) finishes writing asynchronously. This used
+  // to markRead() and then process.exit(0), which discarded the rest: Claude
+  // Code got invalid JSON and dropped the briefing, while the cursor had already
+  // moved past those crash events for good. Advance it only once the bytes are
+  // actually out, and never when the write failed -- replaying a briefing is
+  // recoverable, losing one is not.
+  await new Promise((resolve) => {
+    process.stdout.write(JSON.stringify(out) + '\n', (err) => {
+      if (!err) markRead(root, events);
+      resolve();
+    });
+  });
 }
 
 if (require.main === module) {
   main()
     .catch((err) => { process.stderr.write('phantom-events hook: ' + (err && err.message) + '\n'); })
-    .then(() => process.exit(0));
+    .then(() => { process.exitCode = 0; });
 }
 
 module.exports = { findRoot, readEvents, readCursor, unreadOf, describeEvent, timeAgo, buildContext, MAX_SHOWN, STALE_MS };

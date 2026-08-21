@@ -632,7 +632,9 @@ test('a commit that cannot be made keeps the fix and hands it back uncommitted',
 
   assert.equal(res.status, 'fixed', res.message);
   assert.match(out, /commit failed; changes remain uncommitted on phantom\/fix-/);
-  assert.match(out, /leaving you on phantom\/fix-.* with uncommitted changes/);
+  // The reason must be the real one: this used to blame (--no-commit) whatever
+  // had actually gone wrong, sending the user to look at a flag they never set.
+  assert.match(out, /leaving you on phantom\/fix-.* with uncommitted changes \(commit failed\)/);
   assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), res.branch, 'left on the phantom branch');
   assert.match(fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8'), /a \+ b/, 'the fix is still on disk');
   assert.equal(sh(repo, ['rev-parse', 'main']), sh(repo, ['rev-parse', res.branch]), 'and main never moved');

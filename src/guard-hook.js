@@ -3,7 +3,8 @@
 
 /**
  * PreToolUse guard for phantom's headless recovery session. Reads the hook
- * event on stdin and `PHANTOM_GUARD` (JSON) from the environment:
+ * event on stdin and its config as JSON -- from the file named in argv[2] when
+ * one is given, otherwise from `PHANTOM_GUARD` in the environment:
  *   { neverTouch: string[], cwd: string, dryRun: boolean, testCommand: string|null, reportPath: string|null }
  * Exit 2 + one-line stderr reason blocks the tool call. Fails closed: any
  * unparsable input is a block.
@@ -90,27 +91,62 @@ function loadMatcher() {
   }
 }
 
+/**
+ * The fallback matcher must stay a faithful copy of never-touch.js.
+ *
+ * It exists so the guard still blocks when never-touch.js cannot be loaded, but
+ * it used to be a looser reimplementation, and every gap between the two was a
+ * silent hole: it had no `{a,b}` alternation (so a neverTouch of `*.{pem,key}`
+ * was ENTIRELY unenforced whenever the fallback was live), it did not trim the
+ * glob, and it stripped neither a leading `/` nor a repeated `./`. The parity
+ * test in test/guard-hook.test.js compares the two across the shipped defaults
+ * and fails on any new divergence.
+ */
+function fallbackNormalizePath(p) {
+  let out = String(p).replace(/\\/g, '/');
+  while (out.startsWith('./')) out = out.slice(2);
+  return out.replace(/^\/+/, '');
+}
+
 function fallbackGlobToRegExp(glob) {
-  let g = glob.replace(/\\/g, '/').replace(/^\.\//, '');
-  const anyDir = !g.includes('/');
+  const pattern = fallbackNormalizePath(String(glob).trim());
+  const anyDir = !pattern.includes('/');
   let re = '';
-  for (let i = 0; i < g.length; i++) {
-    const ch = g[i];
-    if (ch === '*' && g[i + 1] === '*') {
-      if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2; } else { re += '.*'; i += 1; }
-    } else if (ch === '*') re += '[^/]*';
-    else if (ch === '?') re += '[^/]';
-    else re += ch.replace(/[.+^$()|[\]\\{}]/g, '\\$&');
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        if (pattern[i + 2] === '/') { re += '(?:.*/)?'; i += 3; } else { re += '.*'; i += 2; }
+      } else { re += '[^/]*'; i++; }
+    } else if (ch === '?') {
+      re += '[^/]';
+      i++;
+    } else if (ch === '{') {
+      const close = pattern.indexOf('}', i);
+      if (close === -1) { re += '\\{'; i++; } else {
+        const alts = pattern.slice(i + 1, close).split(',').map((a) => fallbackGlobToRegExp(a).source.slice(1, -1));
+        re += '(?:' + alts.join('|') + ')';
+        i = close + 1;
+      }
+    } else {
+      re += ch.replace(/[.+^$()|[\]\\]/g, '\\$&');
+      i++;
+    }
   }
-  return new RegExp('^' + (anyDir ? '(?:.*/)?' : '') + re + '$', 'i');
+  if (anyDir) re = '(?:.*/)?' + re;
+  return new RegExp('^' + re + '$', 'i');
 }
 
 function fallbackIsNeverTouch(rel, globs) {
-  const p = rel.replace(/\\/g, '/').replace(/^\.\//, '');
-  return (globs || []).some((g) => {
+  const p = fallbackNormalizePath(rel);
+  if (!p) return false;
+  for (const g of globs || []) {
+    if (!g) continue;
     if (fallbackGlobToRegExp(g).test(p)) return true;
-    return g.endsWith('/**') && fallbackGlobToRegExp(g.slice(0, -3)).test(p);
-  });
+    if (g.endsWith('/**') && fallbackGlobToRegExp(g.slice(0, -3)).test(p)) return true;
+  }
+  return false;
 }
 
 function realpathOr(p) {
@@ -246,10 +282,16 @@ async function main() {
     return fail('could not parse hook input');
   }
   try {
-    guard = JSON.parse(process.env.PHANTOM_GUARD || '');
+    // argv[1] is this script; argv[2], when present, is a JSON file holding the
+    // same payload. cmd.exe has no `VAR=value cmd` prefix, so a file is the only
+    // way to hand the guard its config on Windows -- which is why the hook used
+    // to be skipped there entirely, leaving `cat .env` to the permission rules
+    // that do not cover Bash.
+    const fromFile = process.argv[2] ? fs.readFileSync(process.argv[2], 'utf8') : '';
+    guard = JSON.parse(fromFile || process.env.PHANTOM_GUARD || '');
     if (!guard || typeof guard !== 'object') throw new Error('not an object');
   } catch {
-    return fail('PHANTOM_GUARD is missing or malformed');
+    return fail('guard config is missing or malformed (argv file or PHANTOM_GUARD)');
   }
   guard.cwd = path.resolve(guard.cwd || event.cwd || process.cwd());
   guard.neverTouch = Array.isArray(guard.neverTouch) ? guard.neverTouch : [];

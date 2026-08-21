@@ -29,6 +29,31 @@ test('fails closed on malformed input', () => {
   assert.match(run(bash('ls'), baseGuard, { noGuard: true }).stderr, /PHANTOM_GUARD/);
 });
 
+test('the guard config can arrive in a file, which is the only form Windows can use', () => {
+  // cmd.exe has no `VAR=value cmd` prefix, so the POSIX command line could not
+  // carry PHANTOM_GUARD and the hook was skipped on Windows entirely. The deny
+  // rules left behind cover the file tools but not Bash, while the allowlist
+  // grants Bash(cat *) -- so `cat .env` was unguarded there and nowhere else.
+  const guardFile = path.join(cwd, 'guard-config.json');
+  fs.writeFileSync(guardFile, JSON.stringify(baseGuard));
+  const viaFile = (event) => {
+    const env = { ...process.env };
+    delete env.PHANTOM_GUARD;   // the file must be sufficient on its own
+    const r = spawnSync(process.execPath, [HOOK, guardFile], { input: JSON.stringify(event), env, encoding: 'utf8' });
+    return { code: r.status, stderr: r.stderr.trim() };
+  };
+  assert.equal(viaFile(bash('cat .env')).code, 2, 'the read Windows used to allow');
+  assert.match(viaFile(bash('cat .env')).stderr, /never-touch/);
+  assert.equal(viaFile(file('Write', path.join(cwd, '.env'))).code, 2);
+  assert.equal(viaFile(bash('npm test')).code, 0, 'and ordinary commands still pass');
+
+  // A named file that cannot be read is not a reason to fall back to a laxer
+  // source; it fails closed like every other unparsable input.
+  const r = spawnSync(process.execPath, [HOOK, path.join(cwd, 'no-such-file.json')],
+    { input: JSON.stringify(bash('ls')), env: { ...process.env, PHANTOM_GUARD: JSON.stringify(baseGuard) }, encoding: 'utf8' });
+  assert.equal(r.status, 2, 'an unreadable guard file blocks rather than silently using the environment');
+});
+
 test('allows ordinary safe commands silently', () => {
   for (const c of ['npm test', 'node --test test/a.test.js', 'git diff --stat', 'git status', 'ls -la src', 'cat src/index.js', 'grep -rn foo src', 'npx vitest run', 'git log --oneline -5', 'rm tmp.txt', 'echo "x" > out.txt']) {
     const r = run(bash(c));
@@ -225,7 +250,7 @@ test('the fallback matcher and never-touch.js return the same verdict (a diverge
 // trims nor rejects them. Marked todo so the suite stays green until
 // fallbackGlobToRegExp/fallbackIsNeverTouch grow brace alternation, a glob
 // trim, and normalizePath's leading-slash strip; it flips to passing then.
-test('the fallback matcher honours brace alternation, padded globs and leading slashes', { todo: 'fallbackGlobToRegExp diverges from never-touch.js globToRegExp' }, () => {
+test('the fallback matcher honours brace alternation, padded globs and leading slashes', () => {
   const { fallbackIsNeverTouch } = require('../src/guard-hook');
   assert.ok(fallbackIsNeverTouch('key.pem', ['*.{pem,key}']), 'brace alternation');
   assert.ok(fallbackIsNeverTouch('a/b/id_rsa.key', ['*.{pem,key}']), 'brace alternation, nested');

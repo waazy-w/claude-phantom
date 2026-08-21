@@ -112,12 +112,32 @@ test('buildSettings denies every never-touch glob for file tools and wires the h
   assert.ok(JSON.parse(JSON.stringify(s)));
 });
 
-test('buildSettings skips the hook on win32 with a warning', () => {
+test('buildSettings skips the hook on win32 only when it has nowhere to put the config', () => {
   const warnings = [];
   const s = buildSettings(config, '{}', '/x/guard-hook.js', { platform: 'win32', warn: (m) => warnings.push(m) });
   assert.equal(s.hooks, undefined);
   assert.equal(warnings.length, 1);
   assert.ok(s.permissions.deny.length > 0);
+});
+
+test('given a guard file, win32 registers the same hook as everyone else', () => {
+  // The hook used to be skipped on Windows outright, because the POSIX command
+  // carries its config in a `VAR=value` prefix that cmd.exe does not understand.
+  // The deny rules that remained cover Read/Edit/Write/Grep/Glob but NOT Bash,
+  // while the allowlist grants Bash(cat *) -- so `cat .env` was unguarded on
+  // Windows alone. The payload goes in a file now and the hook reads it from
+  // argv, so every platform gets the same guard.
+  const warnings = [];
+  const s = buildSettings(config, '{"neverTouch":[".env"]}', 'C:\\p\\guard-hook.js',
+    { platform: 'win32', warn: (m) => warnings.push(m), guardFilePath: 'C:\\p\\.phantom\\.guard.json' });
+  assert.deepEqual(warnings, [], 'nothing to warn about once the hook is registered');
+  const hook = s.hooks.PreToolUse[0];
+  assert.match(hook.matcher, /Bash/, 'Bash is what the deny rules cannot cover');
+  const command = hook.hooks[0].command;
+  assert.ok(!command.includes('PHANTOM_GUARD='), 'no POSIX env prefix: cmd.exe would treat it as the program name');
+  assert.ok(command.includes('"C:\\p\\guard-hook.js"') && command.includes('"C:\\p\\.phantom\\.guard.json"'),
+    'both paths quoted for cmd.exe: ' + command);
+  assert.ok(command.startsWith('"'), 'the interpreter is quoted too — Program Files has a space in it');
 });
 
 test('buildClaudeArgs produces a spawn argv with stdin prompt and resume support', () => {
