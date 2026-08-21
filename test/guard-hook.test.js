@@ -12,11 +12,11 @@ const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-guard-'));
 const reportPath = path.join(cwd, '.phantom', 'reports', 'r.md');
 const baseGuard = { neverTouch: ['.env', '.env.*', '**/*.pem', '**/secrets/**', '.git/**', 'node_modules/**'], cwd, dryRun: false, testCommand: 'npm test', reportPath };
 
-function run(event, guard = baseGuard, { rawStdin, noGuard } = {}) {
+function run(event, guard = baseGuard, { rawStdin, noGuard, hook = HOOK } = {}) {
   const env = { ...process.env };
   delete env.PHANTOM_GUARD;
   if (!noGuard) env.PHANTOM_GUARD = JSON.stringify(guard);
-  const r = spawnSync(process.execPath, [HOOK], { input: rawStdin !== undefined ? rawStdin : JSON.stringify(event), env, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [hook], { input: rawStdin !== undefined ? rawStdin : JSON.stringify(event), env, encoding: 'utf8' });
   return { code: r.status, stderr: r.stderr.trim(), stdout: r.stdout };
 }
 
@@ -163,4 +163,110 @@ test('a Windows absolute path keeps its separators so the guard cannot fail open
 
   // A token that reads the same either way is not duplicated.
   assert.deepEqual(tokenizeCommand('cat .env', 'win32'), ['cat', '.env']);
+});
+
+// guard-hook.js carries its own copy of the glob logic so the hook still blocks
+// when src/never-touch.js is missing or broken. Two implementations of a
+// security rule drift; when the fallback drifts it under-blocks and a `.env`
+// write is quietly approved -- exactly the shape of the win32 backslash bug
+// above. These fixtures pin the two against each other, over the globs phantom
+// actually ships -- read from config.js so a new default that only one of the
+// two understands fails here instead of in someone's repo.
+const { DEFAULTS, ALWAYS_NEVER_TOUCH } = require('../src/config');
+const REAL_DEFAULTS = [...DEFAULTS.neverTouch, ...ALWAYS_NEVER_TOUCH];
+
+const PARITY_GLOBS = [
+  REAL_DEFAULTS,
+  ['.env'], ['.env.*'], ['**/*.pem'], ['**/*.key'], ['**/secrets/**'], ['**/*.secret*'], ['.git/**'], ['node_modules/**'],
+  ['secrets/**'], ['./.env'], ['config/*.env'], ['a/**/b.key'], ['?.env'], ['*'], ['**'], ['**/*'],
+];
+
+const PARITY_PATHS = [
+  // the never-touch files themselves, at the root and nested
+  '.env', '.env.local', '.env.production', 'sub/.env', 'a/b/c/.env', './.env', '.ENV', '.Env.Local',
+  'key.pem', 'a/b/key.pem', 'id_rsa.key', 'a/id_rsa.key', '.key', 'app.secret', 'a/b.secrets.json',
+  'secrets', 'secrets/db.json', 'a/secrets', 'a/secrets/b/c.json', 'config/dev.env', 'a/x/b.key',
+  '.git', '.git/config', 'a/.git/config', 'node_modules', 'node_modules/x/index.js',
+  // near-misses: the real defaults must not claim these, and neither must the fallback
+  '.environment', 'env.js', 'src/env.js', 'my.env.example', '.envrc', 'env', 'aenv', 'myenv', 'a/env',
+  '.gitignore', 'gitconfig', 'pem', 'x.pem.bak', 'keyfile', 'secretsauce/x', 'x/secrets.json', 'secret',
+  'README.md', 'package.json', 'src/index.js',
+  // a `*` must not cross a directory boundary in either implementation
+  '.env.d/x.js', 'key.pem/x', 'a.secret/b',
+  // win32 spelling: both implementations normalise separators before matching
+  'sub\\.env', 'a\\b\\.env', 'C:\\Users\\me\\.env', 'sub\\secrets\\a.json', '.\\env',
+  // absolute and escaping spellings, as hitsNeverTouch hands them over
+  'etc/passwd', 'Users/me/.env', 'C:/Users/me/.env', '../.env', 'a/../.env', '..', '.',
+];
+
+test('the fallback matcher and never-touch.js return the same verdict (a divergence is a silent hole in the guard)', () => {
+  const { isNeverTouch } = require('../src/never-touch');
+  const { fallbackIsNeverTouch } = require('../src/guard-hook');
+
+  // Guard against a corpus that has quietly degenerated into all-false, which
+  // would make every parity assertion below true for the wrong reason.
+  const matched = PARITY_PATHS.filter((p) => isNeverTouch(p, REAL_DEFAULTS));
+  assert.ok(matched.length >= 20, 'corpus should exercise real matches, got ' + matched.length);
+  assert.ok(PARITY_PATHS.some((p) => !isNeverTouch(p, REAL_DEFAULTS)), 'corpus should exercise real non-matches');
+
+  for (const globs of PARITY_GLOBS) {
+    for (const p of PARITY_PATHS) {
+      const real = isNeverTouch(p, globs);
+      assert.equal(fallbackIsNeverTouch(p, globs), real,
+        'fallback disagrees on ' + JSON.stringify(p) + ' against ' + JSON.stringify(globs) + ' (never-touch.js says ' + real + ')');
+    }
+  }
+});
+
+// KNOWN BUG, not a wishlist: never-touch.js honours these and the fallback does
+// not, so with a broken never-touch.js the guard silently stops enforcing them.
+// `{a,b}` and whitespace-padded globs both reach here straight from a user's
+// .phantomrc -- config.js validates neverTouch entries as strings and neither
+// trims nor rejects them. Marked todo so the suite stays green until
+// fallbackGlobToRegExp/fallbackIsNeverTouch grow brace alternation, a glob
+// trim, and normalizePath's leading-slash strip; it flips to passing then.
+test('the fallback matcher honours brace alternation, padded globs and leading slashes', { todo: 'fallbackGlobToRegExp diverges from never-touch.js globToRegExp' }, () => {
+  const { fallbackIsNeverTouch } = require('../src/guard-hook');
+  assert.ok(fallbackIsNeverTouch('key.pem', ['*.{pem,key}']), 'brace alternation');
+  assert.ok(fallbackIsNeverTouch('a/b/id_rsa.key', ['*.{pem,key}']), 'brace alternation, nested');
+  assert.ok(fallbackIsNeverTouch('.env', [' .env ']), 'glob is trimmed before matching');
+  assert.ok(fallbackIsNeverTouch('/.git/config', ['.git/**']), 'leading slash is stripped from the path');
+  assert.ok(!fallbackIsNeverTouch('sub/', ['']), 'an empty glob matches nothing');
+});
+
+/** A copy of the hook whose sibling never-touch.js is `body`, so the fallback path is what actually runs. */
+function hookWith(body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-guard-broken-'));
+  fs.copyFileSync(HOOK, path.join(dir, 'guard-hook.js'));
+  fs.writeFileSync(path.join(dir, 'never-touch.js'), body);
+  return path.join(dir, 'guard-hook.js');
+}
+
+test('a broken never-touch.js does not open the guard: the fallback matcher still blocks', () => {
+  const hook = hookWith("throw new Error('never-touch.js is broken');\n");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-guard-repo-'));
+  fs.writeFileSync(path.join(repo, '.env'), 'X=1\n');
+  fs.mkdirSync(path.join(repo, 'secrets'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'secrets', 'db.json'), '{}\n');
+  const guard = { ...baseGuard, cwd: repo, reportPath: path.join(repo, '.phantom', 'reports', 'r.md') };
+  const ev = (e) => ({ ...e, cwd: repo });
+
+  // The whole point of the fallback: the module is gone, the writes are still denied.
+  const write = run(ev(file('Write', '.env')), guard, { hook });
+  assert.equal(write.code, 2, 'writing .env must still be denied: ' + JSON.stringify(write));
+  assert.match(write.stderr, /never-touch path: \.env/);
+  assert.equal(run(ev(file('Edit', 'secrets/db.json')), guard, { hook }).code, 2);
+  // Bash tokens reach the matcher by a different route than file tools do, and
+  // these two commands have no other rule that would catch them.
+  assert.equal(run(ev(bash('cat .env')), guard, { hook }).code, 2);
+  assert.equal(run(ev(bash('cat secrets/db.json')), guard, { hook }).code, 2);
+
+  // expandGlob picks its own regex builder from whichever matcher loadMatcher
+  // returned; if that wiring breaks, `.env*` is never expanded and the write is
+  // approved, which is why the glob spelling is checked here and not only above.
+  assert.equal(run(ev(bash('cat .env*')), guard, { hook }).code, 2, 'shell glob must still expand to .env');
+
+  // Failing closed must not mean failing shut: ordinary work still runs.
+  assert.equal(run(ev(bash('npm test')), guard, { hook }).code, 0);
+  assert.equal(run(ev(file('Edit', 'src/index.js')), guard, { hook }).code, 0);
 });

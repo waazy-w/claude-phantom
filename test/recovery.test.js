@@ -10,7 +10,7 @@ const { Writable } = require('node:stream');
 const ui = require('../src/ui');
 const git = require('../src/git');
 const { gatherContext } = require('../src/context');
-const { runRecovery, parseClaudeOutput, ensureExcluded, commitMessage } = require('../src/recovery');
+const { runRecovery, parseClaudeOutput, ensureExcluded, commitMessage, offerBranchDecision } = require('../src/recovery');
 
 const FAKE_SCRIPT = path.join(__dirname, 'fixtures', 'fake-claude.js');
 
@@ -37,6 +37,21 @@ const FAKE = fakeClaudeBin();
 const TEST_CMD = 'node --test test/math.test.js';
 const quiet = new Writable({ write(c, e, cb) { cb(); } });
 ui.setStream(quiet);
+
+/** Phantom's own output, for the paths whose whole job is to tell the user. */
+const capture = () => {
+  let text = '';
+  const s = new Writable({ write(c, e, cb) { text += c; cb(); } });
+  s.text = () => text;
+  return s;
+};
+
+/** Runs `fn` with phantom's output captured, and restores the silence after. */
+async function withOutput(fn) {
+  const out = capture();
+  ui.setStream(out);
+  try { return { result: await fn(), out: out.text() }; } finally { ui.setStream(quiet); }
+}
 
 function sh(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -529,4 +544,185 @@ test('secrets printed by the app never reach the crash JSON, the prompt, or the 
   const report = fs.readFileSync(res.reportPath, 'utf8');
   for (const text of [crashJson, report]) assert.ok(!text.includes(secret) && !text.includes('hunter2'), 'secret leaked');
   assert.ok(crashJson.includes('[REDACTED]'));
+});
+
+test('a crash outside a git repository is refused before anything is created', async () => {
+  // phantom's whole safety story is "your branch is untouched", and every part
+  // of it -- the snapshot stash, the fix branch, the hard revert -- is git. With
+  // no repo there is nothing to undo a bad session with, so it must stop at the
+  // door rather than start editing files in a directory it cannot roll back.
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-nogit-')));
+  const config = makeConfig(dir);
+  const ctx = makeCtx(dir, config);
+  assert.equal(ctx.git, null, 'no repository was found');
+
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+  assert.equal(res.status, 'refused');
+  assert.match(res.message, /not a git repository/);
+  assert.equal(res.branch, null);
+  assert.equal(res.reportPath, null);
+  assert.ok(!fs.existsSync(path.join(dir, '.phantom')), 'nothing was written to the directory');
+
+  // Same refusal for a crash context that still names a root, but the repo it
+  // named is gone -- a saved .phantom/crashes/*.json replayed later.
+  const stale = makeCtx(dir, config);
+  stale.git = { root: dir, branch: 'main', detached: false, headSha: 'deadbeef' };
+  const staleRes = await runRecovery(stale, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+  assert.equal(staleRes.status, 'refused');
+  assert.match(staleRes.message, /not a git repository/);
+});
+
+test('with no test command anywhere, phantom keeps the patch but refuses to call it verified', async () => {
+  // Nothing to run means no evidence, and phantom's one rule is that it never
+  // reports a fix it did not verify itself. The patch is still worth keeping --
+  // it goes to the branch as WIP -- but the status has to say "unverified".
+  const repo = makeRepo();
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0' }, null, 2));
+  sh(repo, ['commit', '-qam', 'drop the test script']);
+  const config = makeConfig(repo, { testCommand: null });
+  const ctx = makeCtx(repo, config);
+  assert.equal(ctx.testCommand, null, 'and nothing to fall back to');
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} }));
+
+  assert.equal(res.status, 'unfixed');
+  assert.equal(res.testsPassed, null, 'not false: no suite ran at all');
+  assert.match(res.message, /could not be verified \(no test run\)/);
+  assert.match(out, /no test command available; phantom cannot verify the patch/);
+  assert.equal(res.iterations, 1, 'and no point resuming to try again');
+  assert.match(sh(repo, ['log', '-1', '--format=%s', res.branch]), /^phantom: WIP \(unfixed\)/);
+  assert.equal(sh(repo, ['diff', '--name-only', 'main', res.branch]), 'src/math.js');
+  assertCleanOriginal(repo);
+});
+
+test('the crash context supplies the test command when the config has none', async () => {
+  // The last fallback before giving up: config, then the context captured at
+  // crash time, then package.json. This is the middle one -- a saved crash
+  // context replayed against a config that no longer sets testCommand, in a
+  // repo with no package.json to answer for it.
+  const repo = makeRepo();
+  fs.unlinkSync(path.join(repo, 'package.json'));
+  sh(repo, ['commit', '-qam', 'no package.json']);
+  const config = makeConfig(repo, { testCommand: null, maxIterations: 1 });
+  const ctx = makeCtx(repo, config);
+  assert.equal(ctx.testCommand, null);
+  ctx.testCommand = TEST_CMD;
+
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+  assert.equal(res.status, 'fixed', res.message);
+  assert.equal(res.testsPassed, true);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /✅ passed — `node --test/);
+  assertCleanOriginal(repo);
+});
+
+test('a commit that cannot be made keeps the fix and hands it back uncommitted', async () => {
+  // A stale .git/index.lock -- a git process that died, or the editor's git
+  // integration running at the same moment -- fails `git add`/`git commit`
+  // while every read-only query keeps working. The fix is verified and real at
+  // that point; dropping it, or checking the user out from under it, would
+  // throw away work phantom just proved good.
+  const repo = makeRepo();
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, {}, { env: scenarioEnv('lock-index'), exit: () => {} }));
+  fs.unlinkSync(path.join(repo, '.git', 'index.lock'));
+
+  assert.equal(res.status, 'fixed', res.message);
+  assert.match(out, /commit failed; changes remain uncommitted on phantom\/fix-/);
+  assert.match(out, /leaving you on phantom\/fix-.* with uncommitted changes/);
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), res.branch, 'left on the phantom branch');
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8'), /a \+ b/, 'the fix is still on disk');
+  assert.equal(sh(repo, ['rev-parse', 'main']), sh(repo, ['rev-parse', res.branch]), 'and main never moved');
+});
+
+test('when the branch phantom must put you back on is gone, it says so', async () => {
+  // Recovery owns the checkout for minutes at a time and the branch it left can
+  // disappear underneath it (another shell, another worktree, a session that ran
+  // git itself). Failing quietly would leave the user on a phantom/ branch they
+  // never asked to be on, believing they are on their own.
+  const repo = makeRepo();
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, {}, { env: scenarioEnv('delete-orig-branch'), exit: () => {} }));
+
+  assert.equal(res.status, 'fixed', res.message);
+  assert.match(out, /could not check out main; you are still on phantom\/fix-/);
+  assert.equal(sh(repo, ['branch', '--list', 'main']), '', 'main really is gone');
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), res.branch);
+  assert.match(sh(repo, ['log', '-1', '--format=%s']), /^phantom: fix /, 'the fix is committed, not lost');
+});
+
+test('a snapshot stash that cannot be popped is reported, never silently forgotten', async () => {
+  // --allow-dirty means phantom is holding the only copy of the user's
+  // uncommitted work. If the pop fails -- the entry dropped by another shell, a
+  // conflict -- the one unacceptable outcome is phantom finishing with a green
+  // banner and no mention of it.
+  const repo = makeRepo();
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// my local edit\n');
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('drop-stash'), exit: () => {} }));
+
+  assert.equal(res.status, 'fixed', res.message);
+  assert.match(out, /could not pop the stash automatically; run: git stash pop/);
+  // And the banner keeps pointing at it after the summary, where it is read.
+  assert.match(out, /your stashed changes: git stash pop/);
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
+});
+
+test('tool calls the guard refused are visible in verbose output', async () => {
+  // The deny rules are what stop the session touching .env; when they fire, the
+  // only trace the user can ever see is this line. A session that "did nothing"
+  // because every edit was denied looks identical to a lazy one without it.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const ctx = makeCtx(repo, config);
+
+  ui.log.setVerbose(true);
+  let res;
+  let out;
+  try {
+    ({ result: res, out } = await withOutput(() =>
+      runRecovery(ctx, config, {}, { env: scenarioEnv('denied'), exit: () => {} })));
+  } finally { ui.log.setVerbose(false); }
+
+  assert.equal(res.status, 'fixed', res.message);
+  assert.match(out, /2 tool call\(s\) denied by the guard\/permission rules/);
+  assert.match(out, /denied Write \{"file_path":"\.env"\}/);
+  assert.match(out, /denied Bash /);
+});
+
+test('a branch that vanishes while the prompt waits is not claimed as deleted', async () => {
+  // The end-of-run prompt blocks on a human for as long as they take, and
+  // "delete it" is the answer that can fail invisibly: another shell removing
+  // the branch first turns a confident "deleted X" into a lie about the one
+  // thing the user just asked phantom to do. (The rest of this prompt lives in
+  // decide.test.js; this arm needs a branch that disappears mid-answer.)
+  const repo = makeRepo();
+  const branch = 'phantom/fix-x';
+  sh(repo, ['branch', branch]);
+  const baseSha = sh(repo, ['rev-parse', 'HEAD']);
+  const asked = [];
+  const ask = (question) => {
+    asked.push(question);
+    sh(repo, ['branch', '-D', branch]);
+    return Promise.resolve('d');
+  };
+
+  const { out } = await withOutput(() => offerBranchDecision({ status: 'fixed', branch }, {
+    ctx: { git: { branch: 'main' } },
+    s: { baseSha, stayed: false, stashed: false, onPhantomBranch: false },
+    config: {}, flags: {}, opts: { cwd: repo }, ask,
+  }));
+
+  assert.equal(asked.length, 1);
+  assert.match(out, /could not delete the branch; run: git branch -D phantom\/fix-x/);
+  assert.doesNotMatch(out, /deleted phantom\/fix-x/);
 });

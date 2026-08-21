@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Writable } = require('node:stream');
 const { spawn } = require('node:child_process');
-const { runCommand, exitCodeFor, SpawnError } = require('../src/watcher');
+const { runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS, windowsSafeSpawn, escapeArgForCmd } = require('../src/watcher');
 const { extractStackTrace, detectCrash } = require('../src/crash');
 
 const node = process.execPath;
@@ -160,4 +160,98 @@ test('a colourised child stack still yields clean hint files (FORCE_COLOR)', asy
   const { errorLine, hintFiles } = extractStackTrace(r.tail, { cwd: dir });
   assert.strictEqual(errorLine, 'TypeError: kaboom');
   assert.deepStrictEqual(hintFiles, ['boom.js']);
+});
+
+test('a spawn that is refused synchronously still arrives as a SpawnError', async () => {
+  // ENOENT is delivered asynchronously, on the child's 'error' event (the test
+  // above). spawn() also refuses some calls outright, before any child exists --
+  // a NUL byte anywhere in the argv or the environment is the reachable one --
+  // and that throw happens inside the promise executor. If it escapes as the
+  // raw TypeError, cli.js rethrows it (`if (!(err instanceof SpawnError))`) and
+  // the user gets a stack trace and exit 1 instead of one line and exit 126.
+  const NUL = String.fromCharCode(0);
+  for (const [why, opts, args] of [
+    ['argument', {}, ['-e', 'a' + NUL + 'b']],
+    ['environment value', { env: { ...process.env, PHANTOM_X: 'a' + NUL + 'b' } }, ['-e', '1']],
+  ]) {
+    const p = runCommand(node, args, { stdout: sink(), stderr: sink(), ...opts });
+    // No child was ever created, so the kill switch must be a safe no-op rather
+    // than the thing that throws while the caller is handling the failure.
+    assert.strictEqual(p.child, null, why);
+    assert.strictEqual(p.kill(), false, why);
+    await assert.rejects(p, (err) => {
+      assert.ok(err instanceof SpawnError, why + ': got ' + err.name);
+      assert.strictEqual(err.command, node);
+      assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
+      // 126, not 127: the command exists, it could not be started.
+      assert.strictEqual(err.exitCode, 126);
+      assert.ok(err.message.startsWith('failed to start ' + node + ': '), err.message);
+      assert.match(err.message, /null bytes/);
+      return true;
+    });
+  }
+});
+
+test('a failed start leaves no signal handlers behind', async () => {
+  // The handlers are installed per run and removed by the 'close'/'error'
+  // cleanup. A run that never produces a child must not add them, and a run
+  // that fails after the child exists must take them back off -- otherwise
+  // every crashed command in a long phantom session leaks three listeners and
+  // Node starts warning about a leak that is really phantom's.
+  const before = FORWARDED_SIGNALS.map((s) => process.listenerCount(s));
+  await assert.rejects(runCommand(node, ['-e', 'a' + String.fromCharCode(0)], { stdout: sink(), stderr: sink() }));
+  await assert.rejects(runCommand('definitely-not-a-command-xyz', [], { stdout: sink(), stderr: sink() }));
+  await run(['-e', 'process.exit(3)']);
+  assert.deepStrictEqual(FORWARDED_SIGNALS.map((s) => process.listenerCount(s)), before);
+});
+
+test('windowsSafeSpawn decides on the platform first, then on what the name resolves to', () => {
+  // The three routes out of this function are chosen before anything is
+  // spawned, and choosing wrong is silent: a shim spawned directly fails with
+  // ENOENT on Windows, and a real .exe sent through cmd.exe gets its argv
+  // re-parsed (the bug the whole branch exists for). Off win32 the cmd.exe
+  // branch is unreachable, and the Windows CI job never spawns a batch shim, so
+  // the decision is exercised here with the platform stubbed. windows-spawn.js
+  // owns the identity return and the escaping of the line; this owns the fork.
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-dispatch-'));
+  fs.writeFileSync(path.join(dir, 'npm.cmd'), '');
+  fs.writeFileSync(path.join(dir, 'tool.exe'), '');
+  const env = { PATHEXT: '.exe;.cmd', Path: dir, ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+  const args = ['run', 'dev x'];
+
+  // Off win32 every one of these is the identity, whatever the name resolves to.
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+  try {
+    assert.deepStrictEqual(windowsSafeSpawn('npm', args, dir, env), { file: 'npm', argv: args, opts: {} });
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    // A resolved .cmd shim is the only case that gets cmd.exe.
+    const shim = windowsSafeSpawn('npm', args, dir, env);
+    assert.strictEqual(shim.file, env.ComSpec);
+    assert.deepStrictEqual(shim.argv.slice(0, 3), ['/d', '/s', '/c']);
+    assert.strictEqual(shim.argv.length, 4, 'the whole line is one argv slot');
+    // Without this cmd.exe would re-quote the line phantom just escaped by hand.
+    assert.strictEqual(shim.opts.windowsVerbatimArguments, true);
+    assert.ok(shim.argv[3].startsWith('"') && shim.argv[3].endsWith('"'), shim.argv[3]);
+    assert.ok(shim.argv[3].includes(path.join(dir, 'npm.cmd')), 'the resolved shim, not the bare name');
+    assert.ok(shim.argv[3].includes(escapeArgForCmd('dev x')), 'arguments are escaped for cmd');
+
+    // A name that resolves to a real executable is spawned directly: no cmd.exe,
+    // no escaping, argv byte-identical.
+    const exe = windowsSafeSpawn('tool', ['-e', 'console.log("hi")'], dir, env);
+    assert.strictEqual(exe.file, 'tool');
+    assert.deepStrictEqual(exe.argv, ['-e', 'console.log("hi")']);
+    assert.deepStrictEqual(exe.opts, {});
+
+    // A name that resolves to nothing is passed through untouched so spawn
+    // reports ENOENT for the command the user typed -- wrapping it in a cmd.exe
+    // line would turn "command not found: foo" into a cmd.exe diagnostic.
+    assert.deepStrictEqual(windowsSafeSpawn('nosuchcmd', ['a'], dir, env), { file: 'nosuchcmd', argv: ['a'], opts: {} });
+
+    // ComSpec is spelled either way depending on which shell exported it.
+    assert.strictEqual(windowsSafeSpawn('npm', [], dir, { ...env, ComSpec: undefined, comspec: 'X:\\cmd.exe' }).file, 'X:\\cmd.exe');
+  } finally {
+    Object.defineProperty(process, 'platform', real);
+  }
 });

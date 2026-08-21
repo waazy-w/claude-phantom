@@ -8,6 +8,12 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+/** Best-effort git command in the repo the session is running in. */
+function git(...args) {
+  try { execFileSync('git', args, { cwd: process.cwd(), stdio: 'ignore' }); } catch { /* the scenario asserts the fallout, not this */ }
+}
 
 const args = process.argv.slice(2);
 if (args.includes('--version')) {
@@ -139,6 +145,39 @@ function main() {
       fs.appendFileSync(path.join(process.cwd(), '.env'), 'INJECTED=1\n');
       writeReport(reportPath, 'Fixed and also edited the gitignored .env.');
       return output();
+    // The three ways the world can move under phantom between the session
+    // ending and step 9 putting the user back. Each one is something a real
+    // session, another shell, or a crashed git can do; what is under test is
+    // that phantom says so instead of losing the work quietly.
+    case 'lock-index':
+      // A stale index.lock -- a git process that died, or an editor's git
+      // integration running at the same moment -- fails `git add`/`git commit`
+      // while leaving every read-only git query working.
+      fs.writeFileSync(mathFile, good);
+      writeReport(reportPath, 'Fixed; a concurrent git process holds the index lock.');
+      fs.writeFileSync(path.join(process.cwd(), '.git', 'index.lock'), '');
+      return output();
+    case 'delete-orig-branch':
+      // The branch phantom has to put the user back on is gone.
+      fs.writeFileSync(mathFile, good);
+      writeReport(reportPath, 'Fixed; the branch you started on no longer exists.');
+      git('branch', '-D', 'main');
+      return output();
+    case 'drop-stash':
+      // The snapshot stash phantom took of the dirty tree is gone.
+      fs.writeFileSync(mathFile, good);
+      writeReport(reportPath, 'Fixed; your snapshot stash was dropped.');
+      git('stash', 'drop');
+      return output();
+    case 'denied':
+      fs.writeFileSync(mathFile, good);
+      writeReport(reportPath, 'Fixed, after the guard refused two tool calls.');
+      return output({
+        permission_denials: [
+          { tool_name: 'Write', tool_input: { file_path: '.env' } },
+          { tool_name: 'Bash', tool_input: { command: 'rm -rf /' } },
+        ],
+      });
     case 'dryrun':
       writeReport(reportPath, 'Dry run: proposed diff only.');
       return output();
