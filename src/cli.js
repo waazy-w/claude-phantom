@@ -220,9 +220,21 @@ async function main(argv = process.argv.slice(2), io = {}) {
   }
 
   const ctx = gatherContext(result, config);
+  // A non-zero exit with no error line, no stack trace, no file named in the
+  // output and no test command leaves the session nothing to work from: it can
+  // neither locate the fault nor tell whether it fixed it. Observed on a bare
+  // `process.exit(7)` -- 90 seconds and ~300k tokens to conclude nothing, which
+  // is the shape of a linter or build tool that just exits non-zero. Spending a
+  // session to reliably achieve nothing is worse than declining, so phantom says
+  // what it is missing and stops. --dry-run still runs, since a diagnosis with
+  // no verification is exactly what that mode is for.
+  const nothingToGoOn = !ctx.errorLine && !ctx.stackTrace && !ctx.hintFiles.length
+    && !ctx.testCommand && !flags.dryRun && !result.signal;
   const refusal = !ctx.git
     ? 'not a git repository'
-    : ctx.git.dirty && !flags.allowDirty && !flags.dryRun ? 'uncommitted changes in the working tree (commit, stash, or pass --allow-dirty)' : null;
+    : ctx.git.dirty && !flags.allowDirty && !flags.dryRun
+      ? 'uncommitted changes in the working tree (commit, stash, or pass --allow-dirty)'
+      : nothingToGoOn ? 'no error output and no test command — nothing to diagnose or verify against' : null;
   if (ctx.git) await announce.announceCrash(ctx, config, ctx.git.root);
   if (refusal) {
     log.warn(describeCommand(command, args) + ' crashed (' + summarizeExit(result) + '); phantom is not recovering: ' + refusal);

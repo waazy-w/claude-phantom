@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A crash with nothing to go on is now declined instead of recovered. `phantom node -e
+  "process.exit(7)"` spent 90 seconds and ~300k tokens to conclude nothing: no error line,
+  no stack trace, no file named in the output and no test command, so the session could
+  neither locate the fault nor tell whether it had fixed it. That is the shape of a linter
+  or build tool exiting non-zero, and spending a session to reliably achieve nothing is
+  worse than saying so. A project with a test command still gets a recovery -- the suite is
+  both the map and the proof -- and `--dry-run` still runs, since a diagnosis without
+  verification is exactly what that mode is for.
+
 ### Fixed
 
 - **Phantom could report a fix that fixed nothing.** Verification ran the test command and

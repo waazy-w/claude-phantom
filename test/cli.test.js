@@ -152,6 +152,48 @@ test('main: crash prints the banner, hands off to recovery, and keeps the child 
   }
 });
 
+test('main: declines a crash with nothing to go on, but --dry-run still runs', async () => {
+  // Observed for real on `phantom node -e "process.exit(7)"`: 90 seconds and
+  // ~300k tokens to conclude nothing, because there was no error line, no stack
+  // trace, no file named in the output and no test command -- so the session
+  // could neither find the fault nor tell whether it had fixed it. That is the
+  // shape of a linter or build tool exiting non-zero, which is common enough
+  // that spending a session on it is a real cost for no possible benefit.
+  const phantomErr = capture();
+  ui.setStream(phantomErr);
+  try {
+    const repo = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-cli-silent-'));
+    fs.writeFileSync(path.join(repo, 'quiet.js'), 'process.exit(7)');
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'init'], { cwd: repo });
+
+    let called = false;
+    const recovery = { runRecovery: async () => { called = true; return { status: 'fixed', message: 'x' }; } };
+
+    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7,
+      'the exit code is still the command\'s');
+    assert.ok(!called, 'no session is spent');
+    assert.ok(phantomErr.text().includes('nothing to diagnose'), phantomErr.text());
+    assert.ok(!phantomErr.text().includes('taking over'));
+
+    // A diagnosis with no verification is precisely what dry run is for, so it
+    // is still allowed to try.
+    assert.strictEqual(await main(['--dry-run', node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7);
+    assert.ok(called, 'dry run proceeds anyway');
+
+    // And a project with a test command is not silent at all in the sense that
+    // matters: the suite can both locate the fault and prove it is gone, so the
+    // absence of a stack trace is no reason to decline.
+    called = false;
+    fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'q', version: '1.0.0', scripts: { test: 'node --test' } }));
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'add tests'], { cwd: repo });
+    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7);
+    assert.ok(called, 'a testable project still gets a recovery');
+  } finally { ui.setStream(null); }
+});
+
 test('main: refuses before the banner outside git or on a dirty tree, keeping the exit code', async () => {
   const phantomErr = capture();
   ui.setStream(phantomErr);
