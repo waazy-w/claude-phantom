@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-21
+
 ### Added
 
 - A spinner with an elapsed-time counter while the Claude session runs. The session prints
@@ -22,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout, three unrecognised replies -- leaves the branch exactly as it was. A conflicting
   merge is reported rather than unwound, since `--abort` would discard a resolvable merge.
 
+- `--no-prompt` flag and `promptOnFinish` config key to turn that prompt off.
+- `scripts/run-tests.js` runs the suite from an explicit file list instead of a shell glob,
+  so `npm test` behaves the same on Windows, and exits 1 rather than 0 when the list comes
+  back empty -- a glob that matches nothing otherwise looks like a green suite.
+- CI runs the suite on `windows-latest` as well. It is non-blocking: 29 of 210 tests fail
+  there today (argument quoting through cmd.exe, POSIX signals, exec bits, path formats),
+  and the leg exists so that gap stays measured rather than assumed.
+
 ### Changed
 
 - Recovery spend is reported in tokens rather than dollars, in the finish banner and in the
@@ -31,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   money for different people. The total counts prompt, completion, and both halves of the
   cache -- omitting cache reads would understate a resumed session by an order of magnitude.
   The post-mortem template placeholder `{{modelCost}}` is now `{{modelUsage}}`.
+- `package.json`'s `homepage` and the README now point at https://claudephantom.dev.
 
 ## [0.1.1] - 2026-08-21
 
@@ -100,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/waazy-w/claude-phantom/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/waazy-w/claude-phantom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/waazy-w/claude-phantom/releases/tag/v0.1.0
