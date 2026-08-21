@@ -31,7 +31,10 @@ const before = fs.readFileSync(sitePath, 'utf8');
 const after = before
   .replace(/v<b>[0-9][0-9.]*<\/b>/g, 'v<b>' + version + '</b>')
   .replace(/claude-phantom [0-9][0-9.]* — MIT/g, 'claude-phantom ' + version + ' — MIT')
-  .replace(/<span class="badge">\d+ tests<\/span>/g, '<span class="badge">' + tests + ' tests</span>');
+  // Any "<n> tests", not just the badge: the count also appears in prose, and a
+  // badge-only pattern let the install panel sit on 193 for fifty releases while
+  // --check reported the site current.
+  .replace(/\b\d+ tests\b/g, tests + ' tests');
 
 /**
  * The plugin and marketplace manifests carry their own version fields, which

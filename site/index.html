@@ -565,7 +565,7 @@ details .a { padding: 0 0 19px; color: var(--ink-2); font-size: 15.4px; max-widt
    INSTALL TABS
    ============================================================ */
 .tabs {
-  display: inline-flex; gap: 2px; margin: 0 auto 14px;
+  display: inline-flex; flex-wrap: wrap; justify-content: center; max-width: 100%; gap: 2px; margin: 0 auto 14px;
   background: var(--panel-2); border: 1px solid var(--panel-rule);
   border-radius: 3px; padding: 3px;
 }
@@ -1009,6 +1009,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
 { <span class="key">"statusLine"</span>: { <span class="key">"type"</span>: "command", <span class="key">"command"</span>: "phantom-status" } }</pre>
     </div>
     <p class="lede rv" style="margin-top:22px">Claude Code can't be interrupted from outside, so the chat message always lands on your next turn. Use the status line or a notification if you want to know instantly.</p>
+    <p class="lede rv" style="margin-top:14px">The CLI and the plugin ship together on one version, and update separately: <code>npm update -g claude-phantom</code>, and <code>claude plugin update phantom@claude-phantom</code> after <code>claude plugin marketplace update claude-phantom</code>. Neither one announces a release and phantom never phones home, so <a href="https://github.com/waazy-w/claude-phantom">watch the repo</a> — <em>Watch → Custom → Releases</em> — and GitHub mails you once per version.</p>
   </div>
 </section>
 
@@ -1100,6 +1101,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
         <button role="tab" id="tab-npm" aria-controls="pane-npm" aria-selected="true">npm</button>
         <button role="tab" id="tab-gh" aria-controls="pane-gh" aria-selected="false">github</button>
         <button role="tab" id="tab-clone" aria-controls="pane-clone" aria-selected="false">clone</button>
+        <button role="tab" id="tab-plugin" aria-controls="pane-plugin" aria-selected="false">plugin</button>
       </div>
 
       <div class="pane" id="pane-npm" role="tabpanel" aria-labelledby="tab-npm">
@@ -1147,7 +1149,23 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
             <button class="copy" data-c="c9">copy</button>
           </div>
         </div>
-        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 193 tests, no install step.</p>
+        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 243 tests, no install step.</p>
+      </div>
+
+      <div class="pane" id="pane-plugin" role="tabpanel" aria-labelledby="tab-plugin" hidden>
+        <div class="install">
+          <div class="cmd">
+            <span class="pr">&rsaquo;</span>
+            <span class="txt" id="c10">/plugin marketplace add waazy-w/claude-phantom</span>
+            <button class="copy" data-c="c10">copy</button>
+          </div>
+          <div class="cmd">
+            <span class="pr">&rsaquo;</span>
+            <span class="txt" id="c11">/plugin install phantom@claude-phantom</span>
+            <button class="copy" data-c="c11">copy</button>
+          </div>
+        </div>
+        <p class="pane-note">Typed inside Claude Code, not your shell — then restart. Anyone can add it; there is no review queue. Gives you <code>/phantom:recover</code>, the crash-recovery skill, and the briefing hooks.</p>
       </div>
 
       <p class="cta-note" style="margin-top:24px">PHANTOM_DISABLED=1 turns it back into a pure passthrough.</p>
@@ -1224,7 +1242,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   });
 
   /* ---------- install method tabs ---------- */
-  var TABS = [['tab-npm', 'pane-npm'], ['tab-gh', 'pane-gh'], ['tab-clone', 'pane-clone']];
+  var TABS = [['tab-npm', 'pane-npm'], ['tab-gh', 'pane-gh'], ['tab-clone', 'pane-clone'], ['tab-plugin', 'pane-plugin']];
   function selectTab(id) {
     TABS.forEach(function (p) {
       var on = p[0] === id;

@@ -47,7 +47,7 @@ phantom --notify npm run dev   # desktop notification on crash and when recovery
 
 ```
 /plugin marketplace add waazy-w/claude-phantom      # inside Claude Code: crash briefings in your chat
-/plugin install phantom@claude-phantom
+/plugin install phantom@claude-phantom              # then restart Claude Code
 ```
 
 ```json
@@ -236,7 +236,7 @@ Phantom runs in its own terminal while you chat with Claude Code in another. Thr
 
 Claude Code cannot be interrupted from outside, so the chat message is always on your next turn; use the status line or a notification for instant notice.
 
-**Plugin.** Inside Claude Code, `/plugin marketplace add waazy-w/claude-phantom` then `/plugin install phantom@claude-phantom` — or `claude --plugin-dir ./plugin` (or `node_modules/claude-phantom/plugin`). It ships the `UserPromptSubmit`/`SessionStart` hooks (each event reported once; silent and one `stat` when nothing is new — confirm with `/hooks`), `/phantom:recover` for interactive recovery with you approving each step, and the `crash-recovery` skill, which is the single source of truth the headless prompt is generated from.
+**Plugin.** Inside Claude Code, `/plugin marketplace add waazy-w/claude-phantom` then `/plugin install phantom@claude-phantom`, and restart — or `claude --plugin-dir ./plugin` (or `node_modules/claude-phantom/plugin`) with no install at all. Nothing gatekeeps this: `marketplace add` clones this repository and reads [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) from `main`. The plugin also stands alone — without the CLI you lose the automatic takeover and the hooks stay quiet (they read files only `phantom` writes), but `/phantom:recover` still runs the whole procedure on a crash you paste in. It ships the `UserPromptSubmit`/`SessionStart` hooks (each event reported once; silent and one `stat` when nothing is new — confirm with `/hooks`), `/phantom:recover` for interactive recovery with you approving each step, and the `crash-recovery` skill, which is the single source of truth the headless prompt is generated from.
 
 **Status line.** `phantom-status` (installed with `phantom`) prints one line or nothing. States: `👻 fixing <cmd>…` (crash < 20 min, recovery running), `👻 fixed <cmd> → <branch>`, `👻 could not fix <cmd>`, `👻 dry run: <cmd>`, `👻 <cmd> crashed 25m ago` (no recovery after 20 min); `(+N)` for several unread. It clears when the hook reports the events or after `phantom-status --mark-read`. No status line yet: `"statusLine": { "type": "command", "command": "phantom-status" }` in `~/.claude/settings.json`. Already have one: copy [`examples/statusline.sh`](examples/statusline.sh), set `BASE` to your current command, point `statusLine.command` at the script — it replays Claude Code's stdin JSON to both.
 
@@ -251,6 +251,26 @@ brew install terminal-notifier
 Phantom uses it automatically once present, with the phantom icon. Without it, phantom falls back to built-in `osascript`, and on macOS 14+ a `display notification` from a command-line process is discarded: nothing appears, `osascript` exits 0, and the script never registers under System Settings → Notifications, so there is no permission to grant and nothing phantom can detect. Verified on 15.6. Phantom warns once per run when it is on that path, because silence is otherwise indistinguishable from working.
 
 Linux uses `notify-send` (`libnotify-bin` / `libnotify`) with the icon. Windows: silently ignored. Best-effort, 4 s timeout, never delays a recovery.
+
+## Updating
+
+The CLI and the plugin are released together and always carry the same version, but they update through different channels.
+
+```sh
+npm view claude-phantom version   # what the latest release is
+npm update -g claude-phantom      # the CLI
+```
+
+```sh
+claude plugin marketplace update claude-phantom   # refresh the listing
+claude plugin update phantom@claude-phantom       # then restart Claude Code to apply
+```
+
+Both also work from the `/plugin` menu inside Claude Code, which shows what is installed and what is available.
+
+**Neither channel announces anything, so subscribe once:** on [the repository](https://github.com/waazy-w/claude-phantom), *Watch → Custom → Releases*. GitHub then emails you once per version, which covers both halves, and [every release](https://github.com/waazy-w/claude-phantom/releases) carries notes. There is no telemetry and phantom never checks for a newer version behind your back — it makes no network calls at all.
+
+One thing to know about the plugin: `marketplace add` tracks this repository's `main`, not the npm release, so `claude plugin update` gives you whatever is currently on the default branch. That is usually a good thing — a fix reaches you before it is published — but it is not a pinned version.
 
 ## Demo GIF
 
