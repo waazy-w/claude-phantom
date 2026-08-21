@@ -221,6 +221,11 @@ test('ask defaults to interactive only when both stdin and stderr are TTYs', asy
 });
 
 test('setStream stops a live spinner so it cannot repaint over the next stream', () => {
+  // NO_COLOR pins the exact bytes: npm exports FORCE_COLOR=1 to lifecycle
+  // scripts when stdout is a terminal, so without this the assertion passes in
+  // CI and under a piped `npm test`, and fails only in a real terminal.
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
   const first = capture();
   first.isTTY = true;
   ui.setStream(first);
@@ -230,5 +235,8 @@ test('setStream stops a live spinner so it cannot repaint over the next stream',
   try {
     ui.log.info('after');
     assert.strictEqual(second.text(), 'phantom › after\n', 'no leftover clear/redraw from the old spinner');
-  } finally { ui.setStream(null); }
+  } finally {
+    ui.setStream(null);
+    if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
+  }
 });
