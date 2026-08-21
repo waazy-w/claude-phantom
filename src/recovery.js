@@ -12,7 +12,7 @@ const report = require('./report');
 const prompt = require('./prompt');
 const { isNeverTouch } = require('./never-touch');
 const audit = require('./audit');
-const { windowsSafeSpawn } = require('./watcher');
+const { windowsSafeSpawn, killTree } = require('./watcher');
 const { summarizeExit } = require('./crash');
 
 const { log, colors } = ui;
@@ -95,8 +95,8 @@ function runClaude(opts) {
     let killTimer = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill('SIGTERM'); } catch { /* already gone */ }
-      killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, KILL_GRACE_MS);
+      killTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => { killTree(child, 'SIGKILL'); }, KILL_GRACE_MS);
     }, Math.max(1, opts.timeoutMs));
     child.stdout.on('data', (c) => { stdout += c; });
     if (child.stderr) child.stderr.on('data', (c) => { stderr += c; });
@@ -201,9 +201,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       removeSignalHandlers();
       const child = s.child;
       if (child && child.exitCode === null && !child.signalCode) {
-        try { child.kill('SIGTERM'); } catch { /* gone */ }
+        killTree(child, 'SIGTERM');
         await waitForExit(child, KILL_GRACE_MS);
-        if (child.exitCode === null && !child.signalCode) { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+        if (child.exitCode === null && !child.signalCode) killTree(child, 'SIGKILL');
       }
       const opts = { cwd: s.root };
       if (s.done) {

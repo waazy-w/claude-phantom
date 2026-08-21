@@ -4,7 +4,8 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { escapeArgForCmd, resolveWindowsCommand, windowsSafeSpawn } = require('../src/watcher');
+const { spawn } = require('node:child_process');
+const { escapeArgForCmd, resolveWindowsCommand, windowsSafeSpawn, killTree } = require('../src/watcher');
 
 // These are pure functions, so the whole file runs on any platform. That is the
 // point: the .cmd branch of windowsSafeSpawn is unreachable off win32 and the
@@ -223,10 +224,13 @@ test('a command containing a separator is a path, not a PATH lookup', () => {
   const env = { PATHEXT: '.cmd', Path: plain };
   assert.strictEqual(resolveWindowsCommand('./tool', withSpace, env), path.join(withSpace, 'tool.cmd'));
   // A backslash counts as a separator too, so `.\tool` is a path and is never
-  // answered from PATH. (Off win32 path.resolve cannot join a backslash form,
-  // so all that is observable here is that PATH was not consulted -- on Windows
-  // this same call resolves to the cwd copy.)
-  assert.strictEqual(resolveWindowsCommand('.\\tool', withSpace, env), null);
+  // answered from PATH. What it resolves to is platform-dependent and that is
+  // not what this test is about: off win32 the backslash is an ordinary
+  // filename character and PATHEXT casing is significant, while on win32 it is
+  // a separator and the lookup is case-insensitive. Either way the answer must
+  // not be the copy sitting on PATH.
+  const backslash = resolveWindowsCommand('.\\tool', withSpace, env);
+  assert.notStrictEqual(backslash, path.join(plain, 'tool.cmd'), 'PATH must not answer a path');
   // An absolute path resolves against itself regardless of cwd.
   assert.strictEqual(resolveWindowsCommand(path.join(withSpace, 'tool'), root, env), path.join(withSpace, 'tool.cmd'));
   // Relative to cwd, reaching into a sibling directory.
@@ -259,7 +263,7 @@ test('the default PATHEXT applies when the environment does not set one', () => 
 
 // --- windowsSafeSpawn -------------------------------------------------------
 
-test('windowsSafeSpawn is the identity off win32', () => {
+test('windowsSafeSpawn is the identity off win32', { skip: process.platform === 'win32' ? 'the cmd.exe branch is live here, not the identity' : false }, () => {
   // Off win32 this is the only reachable branch: the cmd.exe branch is gated on
   // process.platform and cannot be exercised here, so what it produces is
   // covered indirectly by the escapeArgForCmd tests above.
@@ -277,4 +281,26 @@ test('windowsSafeSpawn is the identity off win32', () => {
   assert.deepStrictEqual(shim.argv, args);
   assert.deepStrictEqual(shim.opts, {});
   assert.ok(!('windowsVerbatimArguments' in shim.opts));
+});
+
+// --- killTree ---------------------------------------------------------------
+
+test('killTree stops a real child and is safe on a process that is already gone', async () => {
+  // On win32 a .cmd shim makes the spawned process cmd.exe and the real work a
+  // grandchild, so killTree shells out to `taskkill /T` to walk the tree. Here
+  // it delegates to child.kill, and what matters is that the child dies.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+  assert.strictEqual(killTree(child, 'SIGTERM'), true);
+  const { code, signal } = await exited;
+  assert.ok(signal === 'SIGTERM' || code !== 0, 'the child was terminated, got ' + signal + '/' + code);
+
+  // Killing it a second time must not throw -- the abort path is idempotent and
+  // races a normal exit every time it runs.
+  assert.doesNotThrow(() => killTree(child, 'SIGKILL'));
+
+  // A child that never spawned is not an error either: the caller cannot always
+  // know whether spawn got far enough to produce one.
+  assert.strictEqual(killTree(null, 'SIGTERM'), false);
+  assert.strictEqual(killTree({}, 'SIGTERM'), false);
 });

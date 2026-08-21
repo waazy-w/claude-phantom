@@ -231,8 +231,15 @@ test('dry run creates no branch and changes no tracked files', async () => {
   const calls = readLog(logFile);
   assert.ok(!calls[0].args.includes('Edit'));
   assert.ok(calls[0].args.includes('Write'));
+  // The --settings blob is a single argv element full of spaces, quotes, braces
+  // and globs; on Windows it also has to survive cmd.exe and the .cmd shim's own
+  // parse, so round-tripping the deny list is the end-to-end escaping check.
   const settings = JSON.parse(calls[0].args[calls[0].args.indexOf('--settings') + 1]);
-  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /"dryRun":true/);
+  assert.deepEqual(settings.permissions.deny.filter((r) => r.startsWith('Write(')), config.neverTouch.map((g) => 'Write(' + g + ')'));
+  // buildSettings ships no hooks on win32 (the hook command is a POSIX shell
+  // line), so dry run rests on --allowedTools there; assert the guard's dryRun
+  // flag only where the hook actually exists.
+  if (process.platform !== 'win32') assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /"dryRun":true/);
 });
 
 test('dry run tolerates a dirty tree', async () => {

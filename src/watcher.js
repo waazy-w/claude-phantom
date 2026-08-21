@@ -10,7 +10,7 @@
  * stdin is inherited so interactive children keep working.
  */
 
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -146,10 +146,10 @@ function runCommand(command, args = [], opts = {}) {
       userInterrupted = true;
       if (onSignal) onSignal(signal);
       if (child.exitCode === null && child.signalCode === null) {
-        try { child.kill(signal); } catch { /* already gone */ }
+        killTree(child, signal);
         if (!killTimer) {
           killTimer = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch { /* already gone */ }
+            killTree(child, 'SIGKILL');
           }, killGraceMs);
           killTimer.unref();
         }
@@ -193,7 +193,7 @@ function runCommand(command, args = [], opts = {}) {
   });
 
   promise.child = child;
-  promise.kill = (signal = 'SIGTERM') => (child ? child.kill(signal) : false);
+  promise.kill = (signal = 'SIGTERM') => (child ? killTree(child, signal) : false);
   return promise;
 }
 
@@ -210,6 +210,31 @@ function exitCodeFor(runResult) {
     return num ? 128 + num : 1;
   }
   return 1;
+}
+
+/**
+ * Terminate a child and everything it started.
+ *
+ * On POSIX `child.kill()` reaches the process phantom spawned, which is the
+ * process doing the work. On Windows a `.cmd` shim means the thing phantom
+ * spawned is cmd.exe and the real work is a grandchild, so killing the child
+ * leaves the grandchild running -- a recovery that hits its timeout, or a
+ * Ctrl+C, would appear to stop while claude kept going. taskkill /T walks the
+ * tree; /F is required because there is no graceful signal to send.
+ * @returns {boolean} whether a kill was issued
+ */
+function killTree(child, signal) {
+  if (!child || child.pid === undefined) return false;
+  if (process.platform !== 'win32') {
+    try { return child.kill(signal); } catch { return false; }
+  }
+  try {
+    spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  } catch { /* taskkill missing or the tree is already gone */ }
+  // Still signal the child itself: taskkill may have raced with a normal exit,
+  // and this is what settles the promise if the process object is still live.
+  try { child.kill(signal); } catch { /* already gone */ }
+  return true;
 }
 
 /**
@@ -235,5 +260,5 @@ function windowsSafeSpawn(command, args, cwd, env) {
 
 module.exports = {
   runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS,
-  windowsSafeSpawn, resolveWindowsCommand, escapeArgForCmd,
+  windowsSafeSpawn, resolveWindowsCommand, escapeArgForCmd, killTree,
 };
