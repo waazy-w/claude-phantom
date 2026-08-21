@@ -57,3 +57,45 @@ test('a throwing notifier never breaks the announcement', async () => {
   const ev = await announce.announceCrash(ctx, { notify: true }, root, { notifier });
   assert.equal(ev.type, 'crash');
 });
+
+const ui = require('../src/ui');
+const { Writable } = require('node:stream');
+const capture = () => {
+  let text = '';
+  const w = new Writable({ write(c, e, cb) { text += c; cb(); } });
+  w.text = () => text;
+  return w;
+};
+const gitRepo = () => {
+  const root = tmp();
+  require('node:child_process').execFileSync('git', ['init', '-q'], { cwd: root });
+  return root;
+};
+
+test('warns once when notifications go through osascript, which macOS may drop', async () => {
+  // Verified on macOS 15.6: `display notification` from a CLI exits 0, nothing
+  // appears, and the script never even shows up under System Settings →
+  // Notifications, so there is no permission to grant and nothing phantom can
+  // detect. Saying so is the only honest option.
+  const out = capture();
+  ui.setStream(out);
+  const root = gitRepo();
+  try {
+    const notifier = { send: async () => ({ ok: true, via: 'osascript' }) };
+    await announce.announceCrash(ctx, { notify: true }, root, { notifier });
+    await announce.announceRecovery(ctx, { notify: true }, { status: 'fixed', message: 'ok' }, root, { notifier });
+    const warnings = (out.text().match(/brew install terminal-notifier/g) || []).length;
+    assert.equal(warnings, 1, 'said once for the pair, not once each: ' + out.text());
+  } finally { ui.setStream(null); }
+});
+
+test('says nothing when a notifier that actually delivers is in use', async () => {
+  const out = capture();
+  ui.setStream(out);
+  const root = gitRepo();
+  try {
+    const notifier = { send: async () => ({ ok: true, via: 'terminal-notifier' }) };
+    await announce.announceCrash(ctx, { notify: true }, root, { notifier });
+    assert.ok(!out.text().includes('brew install'), out.text());
+  } finally { ui.setStream(null); }
+});

@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Documentation
+### Fixed
 
-- `--notify` on macOS needs a one-time permission for Script Editor, and macOS drops the
-  notification *and reports success* until it is granted -- so the feature looks like it is
-  working while nothing appears. That requirement was buried in a parenthetical about
-  `terminal-notifier`, which is the optional path; it applies to the default one. Now
-  stated up front, with a one-line command to check it.
+- `--notify` produced nothing at all on macOS 15.6, with no way to tell. A
+  `display notification` from a command-line process is discarded: nothing appears,
+  `osascript` exits 0, and the script never registers under System Settings →
+  Notifications -- so there is no permission to grant, and phantom cannot observe the
+  difference between delivered and dropped. It now warns once per run when it is on that
+  path and points at `brew install terminal-notifier`, which ships its own bundle and does
+  deliver. The README previously said to allow Script Editor; that entry never appears, so
+  the advice was wrong.
 
 ### Changed
 

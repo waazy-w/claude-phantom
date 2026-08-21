@@ -242,13 +242,13 @@ Claude Code cannot be interrupted from outside, so the chat message is always on
 
 **Desktop notification.** `phantom --notify …` or `"notify": true`.
 
-**macOS requires a one-time permission, and gives no sign when it is missing.** Notifications go through built-in `osascript`, which macOS attributes to **Script Editor** (Apple does not let scripts choose their own identity). Until Script Editor is allowed, macOS drops the notification *and still reports success* — so `--notify` looks like it is working and nothing appears. Turn it on in **System Settings → Notifications → Script Editor → Allow Notifications**, then check with:
+**On macOS, install `terminal-notifier` or expect nothing to appear.**
 
 ```sh
-osascript -e 'display notification "test" with title "phantom"'
+brew install terminal-notifier
 ```
 
-`brew install terminal-notifier` and phantom switches to it automatically, with the phantom icon instead of Script Editor's — that needs the same one-time permission, under Terminal Notifier.
+Phantom uses it automatically once present, with the phantom icon. Without it, phantom falls back to built-in `osascript`, and on macOS 14+ a `display notification` from a command-line process is discarded: nothing appears, `osascript` exits 0, and the script never registers under System Settings → Notifications, so there is no permission to grant and nothing phantom can detect. Verified on 15.6. Phantom warns once per run when it is on that path, because silence is otherwise indistinguishable from working.
 
 Linux uses `notify-send` (`libnotify-bin` / `libnotify`) with the icon. Windows: silently ignored. Best-effort, 4 s timeout, never delays a recovery.
 

@@ -3,6 +3,7 @@
 const path = require('node:path');
 const events = require('./events');
 const git = require('./git');
+const { log } = require('./ui');
 
 const ICON = path.join(__dirname, '..', 'brand', 'png', 'favicon-512.png');
 
@@ -56,10 +57,27 @@ async function announceRecovery(ctx, config, final, root, deps = {}) {
   return ev;
 }
 
+// Said once per run, not per notification: two identical warnings around one
+// recovery would be worse than the silence they are explaining.
+let warnedAboutOsascript = false;
+
+/**
+ * On macOS 14+ a `display notification` from a plain CLI is dropped without the
+ * script ever appearing under System Settings → Notifications, and osascript
+ * still exits 0 -- so `--notify` looks like it works and nothing arrives, with
+ * nothing phantom can observe to tell the difference. terminal-notifier ships
+ * its own bundle and does register, so it is the path that actually delivers.
+ */
 async function notifyDesktop(n, deps) {
   try {
     const notifier = deps.notifier || require('./desktop-notify');
-    return await notifier.send(Object.assign({ icon: ICON }, n));
+    const r = await notifier.send(Object.assign({ icon: ICON }, n));
+    if (r && r.via === 'osascript' && !warnedAboutOsascript) {
+      warnedAboutOsascript = true;
+      log.warn('desktop notifications are going through osascript, which recent macOS drops silently'
+        + ' — run `brew install terminal-notifier` if you saw nothing');
+    }
+    return r;
   } catch {
     return { ok: false, error: 'notifier unavailable' };
   }
