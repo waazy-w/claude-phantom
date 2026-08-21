@@ -66,10 +66,12 @@ test('does not retain memory: RSS and live ArrayBuffers stay flat across 50 MB',
         if (i % 64 === 63) global.gc();
       }
     };
-    // Collect immediately before each sample: chunks pushed since the loop's
-    // last gc() are dead but not yet freed, and counting them measures V8's
-    // collection timing rather than what the ring retains.
-    const measure = () => { global.gc(); return process.memoryUsage(); };
+    // Collect twice before each sample. V8 releases ArrayBuffer backing stores on
+    // a background sweeper, so the first gc() returns while a variable slice of
+    // the dead chunks is still counted in arrayBuffers -- sampling there measures
+    // sweeper timing, not retention, and drifts by hundreds of KB between runs.
+    // The second gc() observes the finished sweep, which is stable to the byte.
+    const measure = () => { global.gc(); global.gc(); return process.memoryUsage(); };
     pass();
     const before = measure();
     pass();
@@ -79,6 +81,9 @@ test('does not retain memory: RSS and live ArrayBuffers stay flat across 50 MB',
   const out = execFileSync(process.execPath, ['--expose-gc', '-e', script], { encoding: 'utf8' });
   const m = JSON.parse(out);
   assert.strictEqual(m.size, 256 * 1024);
+  // RSS is an OS-level number that moves with heap growth and fragmentation, so
+  // it only guards against gross leaks. The swept ArrayBuffer total is exact:
+  // retaining even one 64 KB chunk past the ring's bound fails here.
   assert.ok(m.rss < 50 * 1024 * 1024, 'rss grew by ' + m.rss + ' bytes');
-  assert.ok(m.ab < 2 * 1024 * 1024, 'live ArrayBuffers grew by ' + m.ab + ' bytes');
+  assert.ok(m.ab < 64 * 1024, 'live ArrayBuffers grew by ' + m.ab + ' bytes');
 });
