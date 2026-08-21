@@ -37,7 +37,7 @@ test('buildPrompt embeds skill, template, context, report path and redacts secre
   assert.ok(p.includes('npm run test:unit'));
   assert.ok(!p.includes('sk-live-abcdefghijklmnopqrstuvwxyz'), 'secret redacted');
   assert.match(p, /## Crash context \(\d+ values? redacted\)/);
-  assert.ok(p.includes('{{iterations}}') && p.includes('{{duration}}') && p.includes('{{modelCost}}'), 'phantom-filled placeholders kept');
+  assert.ok(p.includes('{{iterations}}') && p.includes('{{duration}}') && p.includes('{{modelUsage}}'), 'phantom-filled placeholders kept');
   assert.ok(!p.includes('{{reportPath}}') && !p.includes('{{command}}'), 'known placeholders rendered');
   assert.ok(p.includes('Mode: **FIX**'));
 });

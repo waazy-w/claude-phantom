@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A spinner with an elapsed-time counter while the Claude session runs. The session prints
+  nothing for minutes at a time, so there was no way to tell work from a hang. It animates
+  only on a TTY, and stays silent under `--verbose`, where the session already streams to
+  the same stderr.
+
+### Changed
+
+- Recovery spend is reported in tokens rather than dollars, in the finish banner and in the
+  post-mortem's `Model / tokens` and `Tokens` rows. A dollar figure reads as what the user
+  was charged, which it is not: the rate depends on the model and on whether the session
+  bills against a subscription or an API key, so the same recovery is a different amount of
+  money for different people. The total counts prompt, completion, and both halves of the
+  cache -- omitting cache reads would understate a resumed session by an order of magnitude.
+  The post-mortem template placeholder `{{modelCost}}` is now `{{modelUsage}}`.
+
 ## [0.1.1] - 2026-08-21
 
 ### Fixed

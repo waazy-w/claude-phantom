@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   renderTemplate, fallbackReport, appendVerification, trimLines, trimBytes, loadTemplate, VERIFICATION_MARKER,
+  formatTokens, sumTokens,
 } = require('../src/report');
 
 const ctx = {
@@ -54,7 +55,7 @@ test('loadTemplate reads the shipped template with its marker', () => {
 test('fallbackReport is complete when Claude wrote nothing', () => {
   const result = { status: 'unfixed', branch: 'phantom/fix-x', reportPath: '/repo/.phantom/reports/r.md', iterations: 2, testsPassed: false, message: 'tests still failing' };
   const md = fallbackReport(ctx, result, {
-    claudeResult: { result: 'I tried but could not.', session_id: 's1', total_cost_usd: 0.12, num_turns: 9 },
+    claudeResult: { result: 'I tried but could not.', session_id: 's1', usage: { input_tokens: 50, output_tokens: 450, cache_read_input_tokens: 2000 }, num_turns: 9 },
     testOutput: 'not ok 1 - sum\n',
     baseSha: 'abc1234def',
   });
@@ -82,7 +83,7 @@ test('appendVerification replaces the marker with a table and trimmed output', (
   const md = '# title\n\n## Verification\n\n' + VERIFICATION_MARKER + '\n\n## Next\n';
   const out = appendVerification(md, {
     status: 'fixed', testCommand: 'npm test', testOutput: Array.from({ length: 60 }, (_, i) => 'line' + i).join('\n'),
-    iterations: 2, durationMs: 125000, costUsd: 0.3456, changedFiles: ['src/a.js', 'test/a.test.js'],
+    iterations: 2, durationMs: 125000, tokens: 118450, changedFiles: ['src/a.js', 'test/a.test.js'],
     branch: 'phantom/fix-x', baseSha: 'abc1234def0', baseBranch: 'main', restoreHint: null,
   });
   assert.ok(!out.includes(VERIFICATION_MARKER));
@@ -91,7 +92,7 @@ test('appendVerification replaces the marker with a table and trimmed output', (
   assert.match(out, /`src\/a\.js`, `test\/a\.test\.js`/);
   assert.match(out, /never-touch audit.*✅ clean/i);
   assert.match(out, /2m 5s/);
-  assert.match(out, /\$0\.35/);
+  assert.match(out, /118\.5k tokens/);
   assert.match(out, /line59/);
   assert.ok(!out.includes('line10\n'), 'only the last 40 lines are kept');
   assert.match(out, /20 lines trimmed/);
@@ -100,7 +101,7 @@ test('appendVerification replaces the marker with a table and trimmed output', (
 
 test('appendVerification appends when the marker is missing and reports failures', () => {
   const out = appendVerification('# no marker\n', {
-    status: 'unfixed', testCommand: 'npm test', testOutput: 'not ok', iterations: 3, durationMs: 4000, costUsd: null,
+    status: 'unfixed', testCommand: 'npm test', testOutput: 'not ok', iterations: 3, durationMs: 4000, tokens: null,
     changedFiles: [], branch: 'phantom/fix-y', baseSha: 'abc', baseBranch: 'main', restoreHint: 'git stash pop',
     neverTouchViolations: ['.env'],
   });
@@ -115,11 +116,44 @@ test('appendVerification appends when the marker is missing and reports failures
 test('appendVerification reuses the template heading instead of duplicating it', () => {
   const tpl = loadTemplate();
   const out = appendVerification(tpl, {
-    status: 'fixed', testCommand: 'npm test', testOutput: 'ok', iterations: 1, durationMs: 1000, costUsd: 0.1,
+    status: 'fixed', testCommand: 'npm test', testOutput: 'ok', iterations: 1, durationMs: 1000, tokens: 900,
     changedFiles: ['a.js'], branch: 'b', baseSha: 'abc', baseBranch: 'main',
   });
   assert.equal((out.match(/^## Verification/gm) || []).length, 1, out);
   assert.match(out, /## Verification \(independent\)\n\n\| Check \| Result \|/);
   assert.ok(!out.includes('Leave the marker below'));
-  assert.ok(out.indexOf('## Alternatives') > out.indexOf('| Cost |'));
+  assert.ok(out.indexOf('## Alternatives') > out.indexOf('| Tokens |'));
+});
+
+test('sumTokens counts prompt, completion, and both halves of the cache', () => {
+  assert.equal(sumTokens({
+    input_tokens: 120, output_tokens: 880, cache_creation_input_tokens: 4000, cache_read_input_tokens: 7200,
+  }), 12200);
+  // Cache reads dominate a resumed session; dropping them would understate it.
+  assert.equal(sumTokens({ input_tokens: 10, cache_read_input_tokens: 990 }), 1000);
+  assert.equal(sumTokens({ input_tokens: 5, unknown_field: 999 }), 5, 'unknown fields are ignored');
+  assert.equal(sumTokens({ input_tokens: 'lots', output_tokens: 3 }), 3, 'non-numeric fields are ignored');
+  for (const empty of [undefined, null, {}, 'nope', 42]) assert.equal(sumTokens(empty), 0);
+});
+
+test('formatTokens scales units and never reports a dollar figure', () => {
+  assert.equal(formatTokens(0), '0 tokens');
+  assert.equal(formatTokens(999), '999 tokens');
+  assert.equal(formatTokens(1000), '1k tokens');
+  assert.equal(formatTokens(12200), '12.2k tokens');
+  assert.equal(formatTokens(999999), '1000k tokens');
+  assert.equal(formatTokens(1e6), '1M tokens');
+  assert.equal(formatTokens(2450000), '2.45M tokens');
+  assert.equal(formatTokens(3200000), '3.2M tokens');
+  for (const bad of [null, undefined, NaN, Infinity, -1, '900']) assert.equal(formatTokens(bad), 'n/a');
+});
+
+test('no rendered report mentions a dollar amount', () => {
+  const md = appendVerification(loadTemplate(), {
+    status: 'fixed', testCommand: 'npm test', testOutput: 'ok', iterations: 1, durationMs: 1000, tokens: 12200,
+    changedFiles: ['a.js'], branch: 'b', baseSha: 'abc', baseBranch: 'main',
+  });
+  assert.match(md, /12\.2k tokens/);
+  assert.ok(!/\$\d/.test(md), 'a dollar figure would misstate what the user was charged');
+  assert.ok(!/cost/i.test(md.split('## Verification (independent)')[1] || ''), md);
 });

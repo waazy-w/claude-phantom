@@ -79,8 +79,32 @@ function formatDuration(ms) {
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
 }
 
-function formatCost(usd) {
-  return typeof usd === 'number' && Number.isFinite(usd) ? '$' + usd.toFixed(2) : 'n/a';
+/**
+ * Recovery spend, in tokens rather than dollars. A dollar figure reads as what
+ * the user was charged, which it is not: the rate depends on the model and on
+ * whether the session bills against a subscription or an API key, so the same
+ * recovery is a different amount of money for different people. Tokens are the
+ * quantity phantom actually consumed and are true for everyone.
+ */
+function formatTokens(tokens) {
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return 'n/a';
+  if (tokens < 1000) return tokens + ' tokens';
+  if (tokens < 1e6) return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
+  return (tokens / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M tokens';
+}
+
+/**
+ * Total tokens billed for one Claude session: prompt, completion, and both
+ * halves of the cache. Cache reads are discounted, not free, so they belong in
+ * the total -- and leaving them out would understate a long session by an order
+ * of magnitude, since most of a resumed session's input is cache.
+ * @param {{ input_tokens?: number, output_tokens?: number,
+ *           cache_creation_input_tokens?: number, cache_read_input_tokens?: number }} [usage]
+ */
+function sumTokens(usage) {
+  if (!usage || typeof usage !== 'object') return 0;
+  const fields = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
+  return fields.reduce((n, f) => n + (Number.isFinite(usage[f]) ? usage[f] : 0), 0);
 }
 
 const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : 'unknown');
@@ -106,8 +130,8 @@ function fallbackReport(ctx, result, extra = {}) {
   const baseSha = shortSha(extra.baseSha || (ctx.git && ctx.git.headSha));
   const branch = result.branch || '(no branch)';
   const summary = ctx.errorLine || summarizeExit(ctx);
-  const modelCost = claude
-    ? [claude.model || null, formatCost(claude.total_cost_usd), claude.num_turns !== undefined ? claude.num_turns + ' turns' : null].filter(Boolean).join(' · ')
+  const modelUsage = claude
+    ? [claude.model || null, formatTokens(sumTokens(claude.usage)), claude.num_turns !== undefined ? claude.num_turns + ' turns' : null].filter(Boolean).join(' · ')
     : 'n/a';
   const lines = [
     '# 👻 Phantom post-mortem — ' + summary,
@@ -123,7 +147,7 @@ function fallbackReport(ctx, result, extra = {}) {
     '| **Branch** | ' + code(branch) + ' (from ' + code(baseBranch) + ' @ ' + code(baseSha) + ') |',
     '| **Iterations** | ' + (result.iterations || 0) + ' |',
     '| **Duration** | ' + formatDuration(extra.durationMs) + ' |',
-    '| **Model / cost** | ' + modelCost + ' |',
+    '| **Model / tokens** | ' + modelUsage + ' |',
     '| **Session** | ' + sessionCell(claude && claude.session_id) + ' |',
     '| **Generated** | ' + new Date().toISOString() + ' |',
     '',
@@ -174,7 +198,7 @@ function fallbackReport(ctx, result, extra = {}) {
  * independent checks.
  * @param {string} markdown
  * @param {{ status: string, testCommand: string|null, testOutput: string|null, iterations: number, durationMs: number,
- *           costUsd: number|null, changedFiles: string[], branch: string|null, baseSha: string|null, baseBranch: string|null,
+ *           tokens: number|null, changedFiles: string[], branch: string|null, baseSha: string|null, baseBranch: string|null,
  *           restoreHint?: string|null, neverTouchViolations?: string[], testsPassed?: boolean|null }} info
  * @returns {string}
  */
@@ -195,7 +219,7 @@ function appendVerification(markdown, info) {
       : info.status === 'dry-run' ? 'none (dry run)' : 'none (no changes were made; the empty branch was removed)'],
     ['Iterations used', String(info.iterations || 0)],
     ['Wall clock', formatDuration(info.durationMs)],
-    ['Cost', formatCost(info.costUsd)],
+    ['Tokens', formatTokens(info.tokens)],
     ['Session', sessionCell(info.sessionId)],
   ];
   if (info.restoreHint) rows.push(['Stashed changes', 'restore with ' + code(info.restoreHint)]);
@@ -231,5 +255,5 @@ function appendVerification(markdown, info) {
 
 module.exports = {
   renderTemplate, fallbackReport, appendVerification, trimLines, trimBytes, loadTemplate,
-  statusBadge, formatDuration, formatCost, sessionCell, VERIFICATION_MARKER, TEMPLATE_PATH,
+  statusBadge, formatDuration, formatTokens, sumTokens, sessionCell, VERIFICATION_MARKER, TEMPLATE_PATH,
 };

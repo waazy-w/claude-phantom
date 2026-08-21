@@ -101,7 +101,7 @@ test('happy path: fix lands on a phantom branch, report has verification, user r
   assert.match(md, /Never-touch audit \| ✅ clean/);
   assert.ok(!md.includes('{{iterations}}') && md.includes('| **Iterations** | 1 |'));
   assert.ok(!md.includes('{{branch}}'));
-  assert.match(md, /\$0\.01/);
+  assert.match(md, /12\.2k tokens/);
   assert.match(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.phantom\/$/m);
   const crashes = fs.readdirSync(path.join(repo, '.phantom', 'crashes'));
   assert.equal(crashes.length, 1);

@@ -10,7 +10,7 @@
 | **Branch** | `{{branch}}` (from `{{baseBranch}}` @ `{{baseSha}}`) |
 | **Iterations** | {{iterations}} |
 | **Duration** | {{duration}} |
-| **Model / cost** | {{modelCost}} |
+| **Model / tokens** | {{modelUsage}} |
 | **Session** | {{session}} |
 | **Generated** | {{generatedAt}} |
 

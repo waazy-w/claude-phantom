@@ -64,7 +64,74 @@ function banner(lines, opts = {}) {
 }
 
 function write(line) {
+  if (live) stream.write(CLEAR_LINE);
   stream.write(colors.dim('phantom ›') + ' ' + line + '\n');
+  if (live) live.render();
+}
+
+const CLEAR_LINE = '\r' + ESC + '[2K';
+const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/** The spinner currently painting the last line of stderr, if any. */
+let live = null;
+
+// Zero-padded so a ticking clock does not jitter in width as it counts.
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return total + 's';
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return minutes + 'm ' + String(total % 60).padStart(2, '0') + 's';
+  return Math.floor(minutes / 60) + 'h ' + String(minutes % 60).padStart(2, '0') + 'm';
+}
+
+/**
+ * An animated status line for phases that are slow and silent -- the Claude
+ * session mainly, which can sit for minutes with nothing to print. The elapsed
+ * counter is the point: it is the difference between "this is working" and
+ * "this has hung".
+ *
+ * Only animates on a TTY. In a pipe, a CI log, or under --verbose (where the
+ * session streams its own output to stderr) a redrawn line is noise or a
+ * collision, so the spinner goes silent and the static log line that precedes
+ * it carries the message on its own.
+ *
+ * @param {string} text
+ * @param {{ enabled?: boolean, intervalMs?: number, now?: () => number }} [opts]
+ */
+function spinner(text, opts = {}) {
+  const now = opts.now || Date.now;
+  const started = now();
+  const enabled = opts.enabled === undefined ? Boolean(stream.isTTY) : Boolean(opts.enabled);
+  let label = String(text);
+  let frame = 0;
+  let stopped = false;
+  let timer = null;
+
+  const api = {
+    render() {
+      if (!enabled || stopped) return;
+      stream.write(CLEAR_LINE + colors.dim('phantom ›') + ' ' + colors.cyan(FRAMES[frame % FRAMES.length])
+        + ' ' + label + ' ' + colors.dim(formatElapsed(now() - started)));
+    },
+    tick() { frame += 1; api.render(); },
+    update(next) { label = String(next); api.render(); },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      if (timer) clearInterval(timer);
+      if (live === api) live = null;
+      if (enabled) stream.write(CLEAR_LINE);
+    },
+  };
+
+  if (enabled) {
+    live = api;
+    api.render();
+    timer = setInterval(api.tick, Math.max(1, opts.intervalMs || 120));
+    // Never let the animation be the reason the process stays alive.
+    if (timer.unref) timer.unref();
+  }
+  return api;
 }
 
 const log = {
@@ -78,7 +145,8 @@ const log = {
 
 /** Test hook: redirect phantom's own output (defaults back to stderr). */
 function setStream(s) {
+  if (live) live.stop();
   stream = s || process.stderr;
 }
 
-module.exports = { colors, banner, log, setStream, colorsEnabled, visibleLength };
+module.exports = { colors, banner, log, spinner, setStream, colorsEnabled, visibleLength };

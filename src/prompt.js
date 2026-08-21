@@ -15,7 +15,7 @@ const RESUME_MAX_TURNS = 40;
 const DEFAULT_INNER_ATTEMPTS = 3;
 
 /** Placeholders Claude must leave for phantom to fill after the session. */
-const PHANTOM_FILLS = ['iterations', 'duration', 'modelCost', 'session'];
+const PHANTOM_FILLS = ['iterations', 'duration', 'modelUsage', 'session'];
 
 const BASH_DENY = [
   'Bash(git push *)', 'Bash(git checkout *)', 'Bash(git switch *)', 'Bash(git reset *)', 'Bash(git stash *)',

@@ -301,7 +301,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let sessionId = null;
     let lastClaude = null;
     let lastTest = null;
-    let costUsd = 0;
+    let tokens = 0;
     let timedOut = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -318,15 +318,21 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       const args = prompt.buildClaudeArgs({ settings, allowedTools, disallowedTools, model: config.model, resumeSessionId: resuming ? sessionId : null });
       const run = runClaude({ bin: config.claudeBin || 'claude', args, prompt: text, cwd: s.root, env, timeoutMs: remaining, verbose: Boolean(flags.verbose) });
       s.child = run.child;
-      const res = await run;
+      // The session prints nothing for minutes at a time; without a ticking
+      // clock there is no way to tell work from a hang. Suppressed under
+      // --verbose, where the session streams to the same stderr.
+      const spin = ui.spinner(resuming ? 'claude is re-reading the failures' : 'claude is diagnosing and patching',
+        flags.verbose ? { enabled: false } : {});
+      let res;
+      try { res = await run; } finally { spin.stop(); }
       s.child = null;
       checkAborted();
       lastClaude = res.json;
-      if (typeof res.json.total_cost_usd === 'number') costUsd += res.json.total_cost_usd;
+      tokens += report.sumTokens(res.json.usage);
       if (res.timedOut) { timedOut = true; log.warn('claude session hit the ' + config.maxMinutes + ' minute cap'); break; }
       if (res.json.session_id) { sessionId = res.json.session_id; s.sessionId = sessionId; log.verbose('claude session ' + sessionId); }
       if (res.json.is_error) log.warn('claude ended with an error: ' + String(res.json.result || res.json.subtype || '').split('\n')[0].slice(0, 200));
-      log.verbose('claude turns=' + res.json.num_turns + ' cost=$' + (res.json.total_cost_usd || 0).toFixed(3) + ' subtype=' + res.json.subtype);
+      log.verbose('claude turns=' + res.json.num_turns + ' tokens=' + report.sumTokens(res.json.usage) + ' subtype=' + res.json.subtype);
       const denials = Array.isArray(res.json.permission_denials) ? res.json.permission_denials : [];
       if (denials.length) {
         log.verbose(denials.length + ' tool call(s) denied by the guard/permission rules');
@@ -338,6 +344,8 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         if (!testCommand) { log.warn('no test command available; phantom cannot verify the patch'); break; }
       }
       log.info('running tests independently: ' + testCommand + ' (attempt ' + attempt + '/' + maxAttempts + ')…');
+      // No spinner here: runTests is spawnSync, so it blocks the event loop and
+      // the animation would freeze mid-frame -- worse than the static line above.
       const t = runTests(testCommand, { cwd: s.root, env: baseEnv, timeoutMs: Math.min(TEST_TIMEOUT_MS, Math.max(1000, deadline - Date.now())) });
       checkAborted();
       lastTest = t.output;
@@ -403,9 +411,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = report.fallbackReport(ctx, { status, branch: reportBranch, reportPath: s.reportPath, iterations, message }, { claudeResult: lastClaude, testOutput: lastTest, baseSha: s.baseSha, durationMs });
     }
     const modelUsed = config.model || (lastClaude && lastClaude.modelUsage && Object.keys(lastClaude.modelUsage)[0]) || null;
-    const modelCost = [modelUsed, report.formatCost(costUsd)].filter(Boolean).join(' · ');
+    const modelUsage = [modelUsed, report.formatTokens(tokens)].filter(Boolean).join(' · ');
     md = report.renderTemplate(md, {
-      iterations, duration: report.formatDuration(durationMs), modelCost, status: report.statusBadge(status), session: report.sessionCell(sessionId),
+      iterations, duration: report.formatDuration(durationMs), modelUsage, status: report.statusBadge(status), session: report.sessionCell(sessionId),
       branch: reportBranch || '(none)', baseSha: s.baseSha.slice(0, 10), baseBranch: ctx.git.branch, reportPath: s.reportPath,
       command: [ctx.command, ...ctx.args].join(' '), exitSummary: summarizeExit(ctx), generatedAt: new Date().toISOString(),
     });
@@ -414,7 +422,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = md.replace(/\*\*Status:\*\*[^\n]*/, '**Status:** ' + report.statusBadge(status) + ' (set by phantom: ' + message + ')');
     }
     md = report.appendVerification(md, {
-      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, costUsd: costUsd || null, changedFiles, sessionId,
+      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, changedFiles, sessionId,
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
     });
     fs.writeFileSync(s.reportPath, md);
@@ -444,7 +452,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     const final = result(status, message);
     // 10. Banner + webhook
-    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, costUsd });
+    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens });
     try {
       const r = await notify.sendWebhook(config.webhook, notify.buildPayload(ctx, final));
       if (!r.skipped) log.verbose('webhook ' + (r.ok ? 'delivered' : 'failed: ' + (r.error || r.status)));
@@ -464,8 +472,8 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   }
 }
 
-function printBanner(final, { ctx, s, restoreHint, durationMs, costUsd }) {
-  const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (costUsd ? ' · ' + report.formatCost(costUsd) : ''))];
+function printBanner(final, { ctx, s, restoreHint, durationMs, tokens }) {
+  const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (tokens ? ' · ' + report.formatTokens(tokens) : ''))];
   lines.push(final.message);
   if (final.branch) {
     lines.push('');

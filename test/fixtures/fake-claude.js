@@ -36,7 +36,7 @@ function writeReport(reportPath, body) {
     '|---|---|',
     '| **Iterations** | {{iterations}} |',
     '| **Duration** | {{duration}} |',
-    '| **Model / cost** | {{modelCost}} |',
+    '| **Model / tokens** | {{modelUsage}} |',
     '',
     '## TL;DR',
     '',
@@ -56,7 +56,8 @@ function writeReport(reportPath, body) {
 function output(extra = {}) {
   const json = {
     type: 'result', subtype: 'success', is_error: false, result: 'Fixed add() in src/math.js', session_id: 'fake-session-1',
-    num_turns: 7, total_cost_usd: 0.0123, duration_ms: 50, permission_denials: [], stop_reason: 'end_turn', ...extra,
+    num_turns: 7, duration_ms: 50, permission_denials: [], stop_reason: 'end_turn',
+    usage: { input_tokens: 120, output_tokens: 880, cache_creation_input_tokens: 4000, cache_read_input_tokens: 7200 }, ...extra,
   };
   process.stdout.write(JSON.stringify(json) + '\n');
 }
