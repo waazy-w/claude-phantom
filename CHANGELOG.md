@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-21
+
+### Fixed
+
+- **The Claude Code plugin never loaded.** `plugin.json` declared
+  `"hooks": "./hooks/hooks.json"`, but Claude Code loads that path by convention, so the
+  manifest registered it a second time and the whole plugin failed with "Duplicate hooks
+  file detected". `/plugin install` reported success; only the `/plugin` error tab showed
+  it. Broken since the plugin was written and shipped in every release, because nothing in
+  the suite read the manifests. `test/plugin-manifest.test.js` now validates both of them:
+  no re-declaration of conventional paths, every referenced directory and hook script
+  exists, the marketplace entry resolves to the plugin, and the versions track
+  `package.json`.
+
 ## [0.3.3] - 2026-08-21
 
 ### Fixed
@@ -227,7 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/waazy-w/claude-phantom/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/waazy-w/claude-phantom/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/waazy-w/claude-phantom/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/waazy-w/claude-phantom/compare/v0.3.0...v0.3.1

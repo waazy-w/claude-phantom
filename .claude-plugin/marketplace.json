@@ -3,14 +3,14 @@
   "owner": { "name": "saaz" },
   "metadata": {
     "description": "Autonomous crash recovery for your terminal: diagnose, regression-test, patch, verify, post-mortem.",
-    "version": "0.3.3"
+    "version": "0.3.4"
   },
   "plugins": [
     {
       "name": "phantom",
       "source": "./plugin",
       "description": "Crash-recovery procedure as a skill plus the /phantom:recover command. Pair with the `phantom` CLI (npm i -g claude-phantom) for automatic takeover on crash.",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "category": "development",
       "keywords": ["crash", "recovery", "debugging", "post-mortem"]
     }
