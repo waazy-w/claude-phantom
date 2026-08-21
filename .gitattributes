@@ -1,0 +1,18 @@
+# Line endings are a product concern here, not just a developer preference.
+#
+# phantom SHIPS text files inside its npm tarball and reads them verbatim at
+# runtime: templates/post-mortem.md is embedded in the prompt, the plugin's
+# SKILL.md has its YAML frontmatter stripped with an LF-anchored regex, and
+# bin/*.js carry a `#!/usr/bin/env node` shebang that POSIX kernels reject the
+# moment a CR sneaks in ("env: node\r: No such file or directory"). Windows
+# checkouts default to core.autocrlf=true, so without this file a package
+# published from Windows would ship CRLF templates and broken bins.
+#
+# Normalize everything to LF in the working tree on every platform. There are
+# no .bat/.cmd/.ps1 files in this repo, so nothing here needs CRLF.
+* text=auto eol=lf
+
+# Binary assets: never inspected for line endings, never diffed as text.
+*.png binary
+*.gif binary
+*.mp4 binary

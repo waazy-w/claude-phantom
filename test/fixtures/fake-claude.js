@@ -62,6 +62,18 @@ function output(extra = {}) {
   process.stdout.write(JSON.stringify(json) + '\n');
 }
 
+/**
+ * Windows runs this fixture as cmd.exe -> node, and killing the session only
+ * kills cmd.exe. Holding the inherited pipes for the rest of the sleep would
+ * keep the parent's 'close' event pending that long, so let them go instead.
+ */
+function releaseInheritedPipes() {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', () => { /* nothing left to write to */ });
+    stream.destroy();
+  }
+}
+
 function main() {
   const scenario = process.env.FAKE_CLAUDE_SCENARIO || 'fix';
   const resumed = args.includes('--resume');
@@ -101,6 +113,7 @@ function main() {
       process.stdout.write('this is not json\n');
       return process.exit(1);
     case 'sleep':
+      if (process.platform === 'win32') releaseInheritedPipes();
       setTimeout(() => output(), 30000);
       return undefined;
     default:

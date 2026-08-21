@@ -34,7 +34,11 @@ function recovery(root, status, branch = null, now = Date.now(), command = ctx) 
 }
 
 test('is executable and has a node shebang', () => {
-  fs.accessSync(BIN, fs.constants.X_OK);
+  // X_OK is meaningless on Windows -- it always succeeds -- but the exec bit is
+  // exactly what makes the shipped bin runnable on POSIX, so keep it asserted there.
+  if (process.platform !== 'win32') fs.accessSync(BIN, fs.constants.X_OK);
+  // Asserted on every platform: a CRLF checkout would ship `#!/usr/bin/env node\r`,
+  // which POSIX kernels refuse to exec. .gitattributes pins these files to LF.
   assert.ok(fs.readFileSync(BIN, 'utf8').startsWith('#!/usr/bin/env node\n'));
 });
 

@@ -9,7 +9,12 @@ const { gatherContext } = require('../src/context');
 const { loadConfig } = require('../src/config');
 
 function repo() {
-  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-ctx-'));
+  // realpathSync.native, not realpathSync: on Windows os.tmpdir() is an 8.3
+  // short name (C:\Users\RUNNER~1\...) and only the native call expands it to
+  // the long form git reports. The stack-trace tails below are built from this
+  // path, so both spellings have to be the same one for the repo-relative
+  // hint-file stripping to have anything to strip.
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'phantom-ctx-'));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: dir });

@@ -34,6 +34,9 @@ function repoWithFix() {
   g('init', '-q', '-b', 'main');
   g('config', 'user.name', 'Test');
   g('config', 'user.email', 'test@example.com');
+  // These tests compare the file byte for byte; without this a Windows checkout
+  // rewrites the LF the test wrote to CRLF and every comparison drifts.
+  g('config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(dir, 'app.js'), 'module.exports = () => 1;\n');
   g('add', '-A');
   g('commit', '-q', '-m', 'init');

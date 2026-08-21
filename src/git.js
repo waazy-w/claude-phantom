@@ -36,7 +36,22 @@ function git(args, opts) {
 }
 
 const isRepo = (opts) => git(['rev-parse', '--is-inside-work-tree'], opts) === 'true';
-const root = (opts) => git(['rev-parse', '--show-toplevel'], opts);
+
+/**
+ * Repo root as a *native* path. git always prints `/` separators, on Windows
+ * too, but every consumer feeds this straight into `path.relative`, `path.join`
+ * or a `startsWith` against a `process.cwd()`-derived path -- which on win32
+ * carry `\`. Mixing the two forms makes the same directory compare unequal:
+ * `context.js` dedupes `{ cwd, root }` into a Set and `crash.js` picks the
+ * first matching prefix, so a `C:/...` root silently loses to the `C:\...` cwd
+ * and stack-trace paths come out relative to the wrong directory. Normalising
+ * once, here at the boundary, keeps that whole class of bug out of the callers.
+ * @returns {string|null}
+ */
+const root = (opts) => {
+  const out = git(['rev-parse', '--show-toplevel'], opts);
+  return out ? path.resolve(out) : null;
+};
 const headSha = (opts) => git(['rev-parse', '--verify', '--quiet', 'HEAD'], opts) || null;
 /** @returns {string|null} branch name, or null when detached / unborn / not a repo */
 const currentBranch = (opts) => git(['symbolic-ref', '--short', '-q', 'HEAD'], opts) || null;

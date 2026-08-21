@@ -8,10 +8,18 @@ const { execFileSync } = require('node:child_process');
 const git = require('../src/git');
 
 function tmpRepo() {
-  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-git-'));
+  // realpathSync.native, not realpathSync: on Windows os.tmpdir() reads TEMP,
+  // which is an 8.3 short name (C:\Users\RUNNER~1\...). Only the native call
+  // expands it to the long form git and every other canonical path report, so
+  // without it the fixture path is not string-comparable with git.root().
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'phantom-git-'));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  // Git for Windows ships core.autocrlf=true in its system config, which
+  // rewrites LF to CRLF on checkout -- stash pop would hand back 'dirty\r\n'.
+  // The fixture asserts on bytes, so pin the line endings instead.
+  execFileSync('git', ['config', 'core.autocrlf', 'false'], { cwd: dir });
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   execFileSync('git', ['add', '-A'], { cwd: dir });
   execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });

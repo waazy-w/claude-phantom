@@ -154,11 +154,29 @@ function hitsNeverTouch(view, globs, isNeverTouch) {
   return Boolean(view.rel) && isNeverTouch(view.rel, globs);
 }
 
-function tokenizeCommand(command) {
-  return String(command)
-    .split(/[\s;&|()`]+/)
-    .map((t) => t.replace(/["'\\]/g, '').replace(/^>+|^<+/, '').replace(/^\d*>+/, ''))
-    .filter(Boolean);
+/**
+ * Split a command line into candidate path tokens.
+ *
+ * Backslashes are stripped because a shell uses them to escape (`.\env`, `r\m`)
+ * -- but on Windows a backslash is the path separator, and stripping it turned
+ * `C:\Users\me\.env` into `C:Usersme.env`: no separator left, so the `.env`
+ * glob missed, the path no longer looked like it escaped the repo, and the
+ * guard allowed a write to a never-touch file. A guard that fails open is worse
+ * than no guard, so on win32 each token is kept in both spellings and every
+ * caller tests all of them.
+ */
+function tokenizeCommand(command, platform = process.platform) {
+  const strip = (t) => t.replace(/^>+|^<+/, '').replace(/^\d*>+/, '');
+  const out = [];
+  for (const raw of String(command).split(/[\s;&|()`]+/)) {
+    const unescaped = strip(raw.replace(/["'\\]/g, ''));
+    if (unescaped) out.push(unescaped);
+    if (platform === 'win32') {
+      const keptSeparators = strip(raw.replace(/["']/g, ''));
+      if (keptSeparators && keptSeparators !== unescaped) out.push(keptSeparators);
+    }
+  }
+  return out;
 }
 
 /** Expand a single-segment shell glob (`.env*`, `conf/*.pem`) against the filesystem. */

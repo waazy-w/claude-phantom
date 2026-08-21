@@ -20,6 +20,11 @@ const collector = () => {
   return s;
 };
 const run = (args, opts = {}) => runCommand(node, args, { stdout: sink(), stderr: sink(), ...opts });
+// Windows has no POSIX signals: kill() is TerminateProcess, so a signal is never
+// delivered to a handler and an exited child only ever reports an exit code.
+const noSignals = process.platform === 'win32'
+  ? 'signals are not deliverable on Windows: kill() terminates outright and children report no signal'
+  : false;
 
 test('clean exit preserves code 0 and code 7', async () => {
   const ok = await run(['-e', 'console.log("hi")']);
@@ -60,7 +65,7 @@ test('a child that throws: exit 1, stack extracted, hint file found', async () =
   assert.deepStrictEqual(hintFiles, ['boom.js']);
 });
 
-test('child killed by SIGSEGV and SIGKILL', async () => {
+test('child killed by SIGSEGV and SIGKILL', { skip: noSignals }, async () => {
   const seg = await run(['-e', 'process.kill(process.pid, "SIGSEGV"); setTimeout(() => {}, 5000)']);
   assert.strictEqual(seg.exitCode, null);
   assert.strictEqual(seg.signal, 'SIGSEGV');
@@ -116,7 +121,7 @@ function runWrapper(mode, env = {}) {
   return { child, ready, done };
 }
 
-test('SIGINT to phantom is forwarded and marks userInterrupted', async () => {
+test('SIGINT to phantom is forwarded and marks userInterrupted', { skip: noSignals }, async () => {
   const w = runWrapper('idle');
   await w.ready;
   w.child.kill('SIGINT');
@@ -126,7 +131,7 @@ test('SIGINT to phantom is forwarded and marks userInterrupted', async () => {
   assert.strictEqual(detectCrash(r), false);
 });
 
-test('a child that ignores SIGINT gets SIGKILL after the grace period', async () => {
+test('a child that ignores SIGINT gets SIGKILL after the grace period', { skip: noSignals }, async () => {
   const w = runWrapper('ignoreSigint', { KILL_GRACE_MS: '300' });
   await w.ready;
   const t0 = Date.now();
@@ -137,7 +142,7 @@ test('a child that ignores SIGINT gets SIGKILL after the grace period', async ()
   assert.ok(Date.now() - t0 >= 250, 'killed too early');
 });
 
-test('SIGTERM to phantom is forwarded too', async () => {
+test('SIGTERM to phantom is forwarded too', { skip: noSignals }, async () => {
   const w = runWrapper('idle');
   await w.ready;
   w.child.kill('SIGTERM');

@@ -12,6 +12,7 @@ const report = require('./report');
 const prompt = require('./prompt');
 const { isNeverTouch } = require('./never-touch');
 const audit = require('./audit');
+const { windowsSafeSpawn } = require('./watcher');
 const { summarizeExit } = require('./crash');
 
 const { log, colors } = ui;
@@ -45,7 +46,8 @@ function timestamp(d = new Date()) {
  * @returns {{ ok: boolean, version?: string, error?: string }}
  */
 function resolveClaudeBin(bin) {
-  const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 15000, shell: process.platform === 'win32' });
+  const probe = windowsSafeSpawn(bin, ['--version'], process.cwd(), process.env);
+  const r = spawnSync(probe.file, probe.argv, { encoding: 'utf8', timeout: 15000, ...probe.opts });
   if (r.error) return { ok: false, error: r.error.code === 'ENOENT' ? '"' + bin + '" not found on PATH' : String(r.error.message) };
   if (r.status !== 0) return { ok: false, error: '"' + bin + ' --version" exited ' + r.status + ': ' + String(r.stderr || '').trim() };
   return { ok: true, version: String(r.stdout || '').trim() };
@@ -75,11 +77,16 @@ function parseClaudeOutput(raw) {
  */
 function runClaude(opts) {
   const started = Date.now();
-  const child = spawn(opts.bin, opts.args, {
+  // Never `shell: true`: cmd.exe would re-split the argv, which shreds the
+  // --settings JSON blob and splits an --allowedTools entry like
+  // Bash(node --test test/x.js) across three slots. Only a .cmd/.bat claude
+  // shim goes through cmd, with each argument escaped for it.
+  const { file, argv, opts: winOpts } = windowsSafeSpawn(opts.bin, opts.args, opts.cwd, opts.env);
+  const child = spawn(file, argv, {
     cwd: opts.cwd,
     env: opts.env,
     stdio: ['pipe', 'pipe', opts.verbose ? 'inherit' : 'pipe'],
-    shell: process.platform === 'win32',
+    ...winOpts,
   });
   const promise = new Promise((resolve) => {
     let stdout = '';

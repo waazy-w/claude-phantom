@@ -12,8 +12,29 @@ const git = require('../src/git');
 const { gatherContext } = require('../src/context');
 const { runRecovery, parseClaudeOutput, ensureExcluded, commitMessage } = require('../src/recovery');
 
-const FAKE = path.join(__dirname, 'fixtures', 'fake-claude.js');
-const TEST_CMD = 'node --test test/*.test.js';
+const FAKE_SCRIPT = path.join(__dirname, 'fixtures', 'fake-claude.js');
+
+/**
+ * Windows honours no shebang: a bare .js path is not a program there, and
+ * whichever way phantom spawns claudeBin it loses -- through cmd.exe the file
+ * association hands it to Windows Script Host, which runs nothing and exits 0,
+ * and a direct spawn cannot start it at all. A .cmd shim is the one shape both
+ * routes launch, and it is the shape the real `claude` takes on Windows anyway.
+ * Generated at run time so no platform-specific fixture is committed.
+ * @returns {string} path to an executable stand-in for `claude`
+ */
+function fakeClaudeBin() {
+  if (process.platform !== 'win32') return FAKE_SCRIPT;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-bin-'));
+  const shim = path.join(dir, 'fake-claude.cmd');
+  fs.writeFileSync(shim, '@"' + process.execPath + '" "' + FAKE_SCRIPT + '" %*\r\n');
+  return shim;
+}
+
+const FAKE = fakeClaudeBin();
+// A literal path, not test/*.test.js: cmd.exe does not expand globs, so the
+// glob would reach node verbatim and no test file would ever be found.
+const TEST_CMD = 'node --test test/math.test.js';
 const quiet = new Writable({ write(c, e, cb) { cb(); } });
 ui.setStream(quiet);
 
@@ -22,7 +43,9 @@ function sh(cwd, args) {
 }
 
 function makeRepo() {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-rec-')));
+  // .native, because os.tmpdir() hands back an 8.3 short name on Windows while
+  // git and the claude child's process.cwd() both report the long form.
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-rec-')));
   fs.mkdirSync(path.join(dir, 'src'));
   fs.mkdirSync(path.join(dir, 'test'));
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', scripts: { test: TEST_CMD } }, null, 2));

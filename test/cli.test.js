@@ -183,7 +183,9 @@ test('main: refuses before the banner outside git or on a dirty tree, keeping th
 
 test('bin/phantom.js is executable and runs end to end', () => {
   const bin = path.join(__dirname, '..', 'bin', 'phantom.js');
-  assert.ok(fs.statSync(bin).mode & 0o111, 'executable bit set');
+  // Windows has no POSIX mode bits (npm installs a .cmd shim instead), so only
+  // assert the exec bit where it is what actually makes `phantom` runnable.
+  if (process.platform !== 'win32') assert.ok(fs.statSync(bin).mode & 0o111, 'executable bit set');
   assert.strictEqual(fs.readFileSync(bin, 'utf8').split('\n')[0], '#!/usr/bin/env node');
   const out = execFileSync(node, [bin, node, '-e', 'console.log("through")'], { encoding: 'utf8' });
   assert.strictEqual(out, 'through\n');

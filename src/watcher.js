@@ -11,7 +11,9 @@
  */
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const os = require('node:os');
+const path = require('node:path');
 const { RingBuffer } = require('./ring-buffer');
 
 /**
@@ -44,6 +46,46 @@ class SpawnError extends Error {
   }
 }
 
+const WINDOWS_BATCH = /\.(?:bat|cmd)$/i;
+const CMD_META = /([()[\]%!^"`<>&|;, *?])/g;
+
+/**
+ * Resolves `command` against PATH the way Windows would, PATHEXT included, so a
+ * batch shim (npm.cmd, npx.cmd, ...) can be told apart from a real executable.
+ * @returns {string|null} the resolved file, or null when nothing matches
+ */
+function resolveWindowsCommand(command, cwd, env) {
+  const exts = (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  const names = path.extname(command) ? [command] : exts.map((ext) => command + ext);
+  // A command with a separator in it is a path, never a PATH lookup. PATH
+  // entries themselves may be quoted when they contain spaces.
+  const dirs = /[\\/]/.test(command)
+    ? [cwd]
+    : (env.Path || env.PATH || '').split(';').map((d) => d.replace(/^"|"$/g, '')).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of names) {
+      try {
+        const full = path.resolve(dir, name);
+        const stat = fs.statSync(full, { throwIfNoEntry: false });
+        if (stat && stat.isFile()) return full;
+      } catch { /* unreadable PATH entry */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Escapes one argument for a `cmd.exe /d /s /c "..."` line. The value is first
+ * quoted for the target's C runtime, then every character cmd itself would act
+ * on is caret-escaped -- after the quotes, so nothing is left inside a region
+ * cmd sees as quoted. Batch files parse their own line a second time, hence the
+ * second pass. Algorithm from https://qntm.org/cmd, as used by cross-spawn.
+ */
+function escapeArgForCmd(arg) {
+  const quoted = '"' + String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1') + '"';
+  return quoted.replace(CMD_META, '^$1').replace(CMD_META, '^$1');
+}
+
 /**
  * @param {string} command
  * @param {string[]} [args]
@@ -69,15 +111,18 @@ function runCommand(command, args = [], opts = {}) {
   let settled = false;
 
   const promise = new Promise((resolve, reject) => {
+    // Only .cmd/.bat shims (npm, npx, ...) need cmd.exe; sending everything
+    // through it -- which is what `shell: true` does -- lets cmd re-parse the
+    // argv and strip the quotes out of arguments like -e 'console.log("hi")'.
+    const { file, argv, opts: winOpts } = windowsSafeSpawn(command, args, cwd, env);
     try {
-      child = spawn(command, args, {
+      child = spawn(file, argv, {
         cwd,
         env,
         stdio: ['inherit', 'pipe', 'pipe'],
         shell: false,
         windowsHide: true,
-        // Best effort: on Windows `npm`, `npx` etc. are .cmd shims that need a shell.
-        ...(process.platform === 'win32' ? { shell: true } : {}),
+        ...winOpts,
       });
     } catch (err) {
       reject(new SpawnError(command, err));
@@ -167,4 +212,28 @@ function exitCodeFor(runResult) {
   return 1;
 }
 
-module.exports = { runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS };
+/**
+ * How to spawn `command` on this platform without a shell re-parsing the argv.
+ * Returns the file and argv to hand to spawn, plus any extra spawn options.
+ * On anything but win32 this is the identity; on win32 a resolved .cmd/.bat
+ * shim is routed through cmd.exe with each argument escaped, and everything
+ * else -- including a command that resolves to nothing, so spawn still reports
+ * ENOENT -- is spawned directly.
+ * @returns {{ file: string, argv: string[], opts: object }}
+ */
+function windowsSafeSpawn(command, args, cwd, env) {
+  if (process.platform !== 'win32') return { file: command, argv: args, opts: {} };
+  const resolved = resolveWindowsCommand(command, cwd, env);
+  if (!resolved || !WINDOWS_BATCH.test(resolved)) return { file: command, argv: args, opts: {} };
+  const line = [resolved.replace(CMD_META, '^$1'), ...args.map(escapeArgForCmd)].join(' ');
+  return {
+    file: env.ComSpec || env.comspec || process.env.ComSpec || 'cmd.exe',
+    argv: ['/d', '/s', '/c', '"' + line + '"'],
+    opts: { windowsVerbatimArguments: true },
+  };
+}
+
+module.exports = {
+  runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS,
+  windowsSafeSpawn, resolveWindowsCommand, escapeArgForCmd,
+};

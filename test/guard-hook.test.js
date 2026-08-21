@@ -140,3 +140,27 @@ test('never-touch paths: quote splitting, globs, case, symlinks, and paths outsi
   }
   assert.equal(run(file('Read', 'sub/other')).code, 0);
 });
+
+test('a Windows absolute path keeps its separators so the guard cannot fail open', () => {
+  const { tokenizeCommand } = require('../src/guard-hook');
+
+  // Backslash stripping exists to undo shell escaping, and on POSIX that is all
+  // a backslash means: `.\env` is `.env`, `r\m` is `rm`.
+  assert.deepEqual(tokenizeCommand('cat .\\env', 'linux'), ['cat', '.env']);
+  assert.deepEqual(tokenizeCommand('r\\m -rf x', 'linux'), ['rm', '-rf', 'x']);
+
+  // On Windows the same strip destroys the path: C:\Users\me\.env became
+  // C:Usersme.env, which matches no never-touch glob and no longer looks like
+  // it escapes the repo -- so the guard allowed the write. Both spellings are
+  // now emitted, and the intact one is what the never-touch check needs.
+  const win = tokenizeCommand('cat C:\\Users\\me\\.env', 'win32');
+  assert.ok(win.includes('C:\\Users\\me\\.env'), 'the intact path survives: ' + JSON.stringify(win));
+  assert.ok(win.includes('C:Usersme.env'), 'the unescaped reading is still checked too');
+
+  // The escaping case still works on Windows: both readings are offered, so a
+  // shell-escaped `.\env` is caught by one and a real path by the other.
+  assert.ok(tokenizeCommand('cat .\\env', 'win32').includes('.env'));
+
+  // A token that reads the same either way is not duplicated.
+  assert.deepEqual(tokenizeCommand('cat .env', 'win32'), ['cat', '.env']);
+});
