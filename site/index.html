@@ -698,11 +698,11 @@ footer a:hover { color: var(--accent-text); }
         <p class="cta-note rv" style="margin-top:10px;text-align:left">or <a href="#install">install from GitHub</a> — <code>npm i -g github:waazy-w/claude-phantom</code></p>
 
         <div class="badges rv">
-          <span class="badge">v<b>0.1.1</b></span>
+          <span class="badge">v<b>0.2.0</b></span>
           <span class="badge">dependencies <b>0</b></span>
           <span class="badge">node <b>&gt;=18</b></span>
           <span class="badge">MIT</span>
-          <span class="badge">193 tests</span>
+          <span class="badge">210 tests</span>
         </div>
       </div>
 
@@ -771,7 +771,7 @@ footer a:hover { color: var(--accent-text); }
         <div class="stage-n">04</div>
         <div>
           <h3>diagnose</h3>
-          <p>A headless <code>claude -p</code> session starts with a minimal tool allowlist, never-touch globs denied, no network and no push path.</p>
+          <p>A headless <code>claude -p</code> session starts with a minimal tool allowlist, never-touch globs denied, no network and no push path. It runs silently for minutes, so phantom keeps a live line and an elapsed clock on stderr — work looks different from a hang.</p>
         </div>
       </div>
       <div class="stage rv">
@@ -869,7 +869,7 @@ footer a:hover { color: var(--accent-text); }
     <div class="rv">
       <div class="eyebrow">what you get back</div>
       <h2>A branch, a banner, and a written account.</h2>
-      <p class="lede">Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete.</p>
+      <p class="lede">Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete — phantom asks which, right there in the terminal.</p>
     </div>
 
     <div class="split">
@@ -880,8 +880,10 @@ footer a:hover { color: var(--accent-text); }
   <span class="dim">review </span>  git diff main..phantom/fix-…-k3f9a2
   <span class="dim">merge  </span>  git merge phantom/fix-…-k3f9a2
   <span class="dim">discard</span>  git branch -D phantom/fix-…-k3f9a2
-  <span class="dim">session</span>  192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b</pre>
-        <p class="demo-cap">Exit code is always your command's. A fixed crash is still exit 1, so phantom is safe in scripts and <code>&amp;&amp;</code> chains.</p>
+  <span class="dim">session</span>  192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b
+
+<span class="dim">phantom ›</span> merge into <span class="wht">main</span>, delete it, or keep it for later? <span class="dim">[m/d/k]</span></pre>
+        <p class="demo-cap">In a terminal it asks; in a pipe, in CI, or under <code>--no-prompt</code> it just prints the commands and exits. Every non-answer — Ctrl+C, EOF, a timeout — leaves the branch untouched. Exit code is always your command's: a fixed crash is still exit 1, so phantom is safe in scripts and <code>&amp;&amp;</code> chains.</p>
       </div>
       <div class="rv">
         <div class="slab-label">.phantom/reports/*.md</div>
@@ -928,6 +930,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
           <tr><td class="f">--max-minutes &lt;n&gt;</td><td>Wall-clock cap for the recovery. Default 15, max 120.</td></tr>
           <tr><td class="f">--model &lt;m&gt;</td><td>Passed through as <code>claude --model &lt;m&gt;</code>.</td></tr>
           <tr><td class="f">--no-commit</td><td>Leave the fix uncommitted on the phantom branch and print the way back.</td></tr>
+          <tr><td class="f">--no-prompt</td><td>Never ask whether to merge or delete the fix branch; just print the commands.</td></tr>
           <tr><td class="f">--notify</td><td>Desktop notification on crash and when recovery ends.</td></tr>
           <tr><td class="f">--verbose</td><td>Stream the session's progress lines.</td></tr>
         </tbody>
@@ -948,6 +951,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   <span class="key">"notify"</span>:          false,
   <span class="key">"model"</span>:           null,
   <span class="key">"autoCommit"</span>:      true,
+  <span class="key">"promptOnFinish"</span>:  true,
   <span class="key">"reportDir"</span>:       ".phantom/reports",
   <span class="key">"ringBufferBytes"</span>: 262144,
   <span class="key">"claudeBin"</span>:       "claude"
@@ -1155,7 +1159,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   <div class="wrap" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;width:100%">
     <div class="ghost-note">
       <svg viewBox="0 0 256 256" aria-hidden="true"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
-      <span>claude-phantom 0.1.1 — MIT</span>
+      <span>claude-phantom 0.2.0 — MIT</span>
     </div>
     <nav>
       <a href="https://github.com/waazy-w/claude-phantom">github</a>
