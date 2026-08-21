@@ -9,14 +9,14 @@
 
 An autonomous crash-recovery agent for your terminal. Run your app through `phantom`; if it crashes, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix independently, and leaves a post-mortem. Your branch is never touched.
 
+<!-- Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape` (see "Demo GIF" below). -->
+
+![phantom recovering a crashed Node service: the app throws, phantom opens a fix branch, patches it, runs the tests itself, and writes a post-mortem](docs/demo.gif)
+
 [![npm version](https://img.shields.io/npm/v/claude-phantom.svg)](https://www.npmjs.com/package/claude-phantom)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-success.svg)](package.json)
-
-<!-- Demo GIF: produce docs/demo.gif with `PHANTOM_REPO="$PWD" vhs docs/demo.tape` (see "Demo GIF" below). -->
-
-![phantom recovering a crashed Node service: the app throws, phantom opens a fix branch, patches it, runs the tests itself, and writes a post-mortem](docs/demo.gif)
 
 ## Setup
 
