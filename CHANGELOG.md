@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Phantom could report a fix that fixed nothing.** Verification ran the test command and
+  nothing else, so a session that changed no code at all -- or changed code without
+  touching the crashing path -- was announced as `✅ fixed · fix verified by phantom` while
+  the original command still crashed with the identical error. The tests that "verified" it
+  were the ones already passing while the command was dying, since the bug lived in a path
+  they never covered. Found by running phantom against a real crash, not by the suite.
+
+  Two changes. A session that changes nothing can no longer be `fixed`, whatever the suite
+  says. And after the tests pass, phantom re-runs the command that crashed: exit 0, or
+  still running at the 30 s cap, is the evidence; the same failure again is `unfixed` with
+  the exit code named. The still-running case is deliberate -- `phantom npm run dev`
+  crashed on boot, and surviving past the point it used to die is exactly the proof wanted,
+  while waiting for an exit would hang the recovery forever.
+
+  The post-mortem's verification table gains a `Crashed command re-run` row, so the
+  distinction between "tests pass" and "the crash is gone" is visible rather than implied.
+  Set `"verifyCommand": false` to skip the re-run if the command has side effects you do
+  not want repeated.
+
 ## [0.3.2] - 2026-08-21
 
 ### Fixed

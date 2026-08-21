@@ -16,6 +16,7 @@ const git = require('./git');
  * @property {string|null} model
  * @property {boolean} autoCommit
  * @property {boolean} promptOnFinish ask whether to merge or delete the fix branch (interactive TTY only)
+ * @property {boolean} verifyCommand re-run the crashed command after the tests pass
  * @property {string} reportDir
  * @property {number} ringBufferBytes
  * @property {string} claudeBin
@@ -33,6 +34,7 @@ const DEFAULTS = Object.freeze({
   model: null,
   autoCommit: true,
   promptOnFinish: true,
+  verifyCommand: true,
   reportDir: '.phantom/reports',
   ringBufferBytes: 262144,
   claudeBin: 'claude',
@@ -107,6 +109,7 @@ function validate(cfg) {
   }
   if (typeof cfg.autoCommit !== 'boolean') throw new ConfigError('autoCommit must be true or false');
   if (typeof cfg.promptOnFinish !== 'boolean') throw new ConfigError('promptOnFinish must be true or false');
+  if (typeof cfg.verifyCommand !== 'boolean') throw new ConfigError('verifyCommand must be true or false');
   if (typeof cfg.notify !== 'boolean') throw new ConfigError('notify must be true or false');
   if (typeof cfg.reportDir !== 'string' || !cfg.reportDir.trim()) throw new ConfigError('reportDir must be a non-empty string');
   if (typeof cfg.claudeBin !== 'string' || !cfg.claudeBin.trim()) throw new ConfigError('claudeBin must be a non-empty string');

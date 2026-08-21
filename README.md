@@ -212,6 +212,7 @@ Flags go before the command; everything after the command is passed through verb
   "model": null,                  // claude --model
   "autoCommit": true,             // commit a successful fix on the phantom branch (never on yours)
   "promptOnFinish": true,         // after a verified fix, ask whether to merge or delete the branch (TTY only)
+  "verifyCommand": true,          // after the tests pass, re-run the command that crashed (30 s cap; still running = fixed)
   "reportDir": ".phantom/reports",// crash captures go to the sibling crashes/
   "ringBufferBytes": 262144,      // output kept for crash context
   "claudeBin": "claude"           // Claude Code executable

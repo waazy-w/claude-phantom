@@ -96,6 +96,25 @@ function main() {
       return output({ session_id: 'fake-session-1' });
     case 'noop':
       return output({ result: 'I could not determine the cause.', subtype: 'error_max_turns', is_error: true });
+    // Reports success and writes a report, but changes not one line of code.
+    // The suite is green either way, because the tests never covered the crash.
+    // Makes a change that satisfies the suite but leaves the entry point broken:
+    // the shape of a fix that passes tests and fixes nothing.
+    case 'tests-only':
+      fs.writeFileSync(mathFile, good);
+      fs.writeFileSync(path.join(process.cwd(), 'src', 'app.js'), 'process.exit(3);\n');
+      writeReport(reportPath, 'Fixed add(); the entry point still fails.');
+      return output();
+    // The `npm run dev` shape: after the fix the entry point boots and keeps
+    // running instead of exiting, which is the evidence the crash is gone.
+    case 'long-running':
+      fs.writeFileSync(mathFile, good);
+      fs.writeFileSync(path.join(process.cwd(), 'src', 'app.js'), 'setInterval(() => {}, 1000);\n');
+      writeReport(reportPath, 'Fixed; the app now stays up.');
+      return output();
+    case 'silent-noop':
+      writeReport(reportPath, 'Looks fine to me.');
+      return output({ result: 'No changes needed.' });
     case 'violate':
       fs.writeFileSync(mathFile, good);
       fs.writeFileSync(path.join(process.cwd(), '.env'), 'SECRET=leaked\n');

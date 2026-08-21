@@ -18,6 +18,7 @@ const { summarizeExit } = require('./crash');
 const { log, colors } = ui;
 
 const TEST_TIMEOUT_MS = 10 * 60 * 1000;
+const REPRO_TIMEOUT_MS = 30 * 1000;
 const KILL_GRACE_MS = 5000;
 const TEST_TAIL_BYTES = 64 * 1024;
 const INSTALL_HINT = 'install Claude Code: npm install -g @anthropic-ai/claude-code (or set "claudeBin" in .phantomrc)';
@@ -114,6 +115,39 @@ function runClaude(opts) {
   });
   promise.child = child;
   return promise;
+}
+
+/**
+ * Re-run the command that crashed, and say whether it still does.
+ *
+ * A green test suite is not proof the crash is gone: the tests that pass here
+ * are usually the ones that were already passing while the command died, since
+ * the bug was in a path they never covered. Only the original command can
+ * answer the question the user actually has.
+ *
+ * A command that is still running at the cutoff counts as fixed. Long-lived
+ * processes are the common case -- `phantom npm run dev` crashed on boot, and
+ * surviving well past the point it used to die is exactly the evidence wanted.
+ * Waiting for it to exit would hang the recovery forever.
+ *
+ * @returns {{ fixed: boolean, stillRunning: boolean, code: number|null, output: string }}
+ */
+function reproduce(ctx, { cwd, env, timeoutMs }) {
+  const started = Date.now();
+  const { file, argv, opts: winOpts } = windowsSafeSpawn(ctx.command, ctx.args || [], cwd, env);
+  const r = spawnSync(file, argv, {
+    cwd, env, encoding: 'utf8', timeout: Math.max(1000, timeoutMs),
+    maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], ...winOpts,
+  });
+  const stillRunning = Boolean(r.error && r.error.code === 'ETIMEDOUT');
+  const output = [r.stdout, r.stderr].filter(Boolean).join('\n');
+  return {
+    fixed: stillRunning || r.status === 0,
+    stillRunning,
+    code: r.status,
+    output: report.trimBytes(output, 4000),
+    durationMs: Date.now() - started,
+  };
 }
 
 /**
@@ -310,6 +344,8 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let lastTest = null;
     let tokens = 0;
     let cached = 0;
+    let repro = null;
+    const reproTimeoutMs = Number(opts.reproTimeoutMs) > 0 ? Number(opts.reproTimeoutMs) : REPRO_TIMEOUT_MS;
     let timedOut = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -359,7 +395,22 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       checkAborted();
       lastTest = t.output;
       testsPassed = t.passed;
-      if (t.passed) { log.info(colors.green('tests pass')); break; }
+      if (t.passed) {
+        log.info(colors.green('tests pass'));
+        if (config.verifyCommand !== false && !dryRun) {
+          const cmd = [ctx.command, ...(ctx.args || [])].join(' ');
+          log.info('re-running the crashed command: ' + cmd + ' (up to ' + Math.round(reproTimeoutMs / 1000) + 's)…');
+          repro = reproduce(ctx, { cwd: s.root, env: baseEnv, timeoutMs: reproTimeoutMs });
+          if (repro.fixed) {
+            log.info(colors.green(repro.stillRunning
+              ? cmd + ' is still running after ' + Math.round(repro.durationMs / 1000) + 's — it no longer crashes'
+              : cmd + ' now exits 0 — the crash is gone'));
+          } else {
+            log.warn(cmd + ' still exits ' + repro.code + '; the tests pass but the crash is not fixed');
+          }
+        }
+        break;
+      }
       log.warn('tests failed (exit ' + t.code + ')' + (t.timedOut ? ' — timed out' : ''));
       if (t.timedOut && deadline - Date.now() <= 0) { timedOut = true; break; }
       if (!sessionId) { log.warn('no session id returned; cannot resume'); break; }
@@ -390,7 +441,10 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     if (dryRun) status = 'dry-run';
     else if (violations.length) status = 'error';
     else if (timedOut) status = 'timeout';
-    else if (testsPassed === true) status = 'fixed';
+    // A session that changed nothing cannot have fixed anything, however green
+    // the suite is: the tests that pass here are the ones that were already
+    // passing while the command crashed.
+    else if (testsPassed === true && changedFiles.length && (!repro || repro.fixed)) status = 'fixed';
     else status = 'unfixed';
 
     // 7. Commit
@@ -406,8 +460,13 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const keepBranch = !dryRun && !s.stayed && Boolean(changedFiles.length || committed);
     const reportBranch = keepBranch ? s.branch : null;
     const messages = {
-      fixed: 'fix verified by phantom; your branch is unchanged',
-      unfixed: testsPassed === null ? 'patch could not be verified (no test run)' : 'tests still failing after ' + iterations + ' attempt(s)',
+      fixed: (repro ? 'fix verified by phantom: tests pass and the command no longer crashes' : 'fix verified by phantom')
+        + '; your branch is unchanged',
+      unfixed: !changedFiles.length
+        ? 'the session made no changes; nothing was fixed'
+        : repro && !repro.fixed
+          ? 'tests pass but ' + [ctx.command, ...(ctx.args || [])].join(' ') + ' still exits ' + repro.code
+          : testsPassed === null ? 'patch could not be verified (no test run)' : 'tests still failing after ' + iterations + ' attempt(s)',
       'dry-run': 'diagnosis and proposed patch written to the report; nothing changed',
       timeout: 'recovery exceeded ' + config.maxMinutes + ' minute(s)',
       error: 'never-touch violation (' + violations.join(', ') + '); ' + (unrestorable.length ? 'inspect ' + unrestorable.join(', ') + ' — phantom cannot restore files git does not track' : 'branch reverted'),
@@ -431,7 +490,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = md.replace(/\*\*Status:\*\*[^\n]*/, '**Status:** ' + report.statusBadge(status) + ' (set by phantom: ' + message + ')');
     }
     md = report.appendVerification(md, {
-      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId,
+      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId, repro, command: [ctx.command, ...(ctx.args || [])].join(' '),
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
     });
     fs.writeFileSync(s.reportPath, md);

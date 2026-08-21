@@ -160,6 +160,85 @@ test('failing tests resume the same session with feedback until green', async ()
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /\| Session \| `fake-session-1` — transcript in `~\/.claude\/projects\/`, reopen with `claude --resume fake-session-1`/);
 });
 
+test('a green suite cannot mean "fixed" while the crashed command still crashes', async () => {
+  // The other half of the same lie. Here the session does change code and the
+  // suite does pass -- but `node src/app.js`, the command that crashed, still
+  // exits non-zero. Tests are evidence about the code; only re-running the
+  // command answers the question the user actually asked.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('tests-only'), exit: () => {} });
+
+  assert.equal(res.testsPassed, true, 'the suite really did pass');
+  assert.equal(res.status, 'unfixed', 'but the command still crashes');
+  assert.match(res.message, /still exits 3/);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /Crashed command re-run \| ❌ still exits 3/);
+  assertCleanOriginal(repo);
+});
+
+test('the happy path re-runs the crashed command and says so', async () => {
+  const repo = makeRepo();
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+
+  assert.equal(res.status, 'fixed');
+  assert.match(res.message, /no longer crashes/);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /Crashed command re-run \| ✅ exits 0/);
+});
+
+test('a command that is still running at the cutoff counts as fixed', async () => {
+  // The `phantom npm run dev` case, and the reason the re-run has a timeout at
+  // all: a server that crashed on boot and now stays up will never exit, so
+  // waiting for an exit code would hang the recovery forever. Surviving well
+  // past the point it used to die is the evidence.
+  const repo = makeRepo();
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, {
+    env: scenarioEnv('long-running'), exit: () => {}, reproTimeoutMs: 1500,
+  });
+
+  assert.equal(res.status, 'fixed');
+  assert.match(res.message, /no longer crashes/);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /Crashed command re-run \| ✅ still running after \d+s, no crash/);
+});
+
+test('verifyCommand: false skips the re-run entirely', async () => {
+  const repo = makeRepo();
+  // Opting out must not turn a broken entry point into a pass by accident: with
+  // no re-run there is simply no claim about the command either way.
+  const config = makeConfig(repo, { maxIterations: 1, verifyCommand: false });
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('tests-only'), exit: () => {} });
+
+  assert.equal(res.status, 'fixed', 'without the re-run, green tests are all phantom has');
+  assert.doesNotMatch(res.message, /no longer crashes/);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /Crashed command re-run \| ⏭ not re-run/);
+});
+
+test('a green suite cannot mean "fixed" when the session changed nothing', async () => {
+  // Found by running phantom for real: the session wrote no code at all, the
+  // existing tests passed -- as they had while the command was crashing, since
+  // they never covered the bug -- and phantom announced "fix verified". The
+  // crashed command still crashed. Passing tests only mean something in
+  // combination with a change; on their own they are the status quo.
+  const repo = makeRepo();
+  // A suite that passes no matter what -- standing in for real tests that simply
+  // do not cover the crashing path, which is the common case.
+  const config = makeConfig(repo, { maxIterations: 1, testCommand: 'node -e ""' });
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('silent-noop'), exit: () => {} });
+
+  assert.equal(res.testsPassed, true, 'the suite really did pass');
+  assert.equal(res.status, 'unfixed', 'but nothing was fixed');
+  assert.match(res.message, /made no changes/);
+  assert.equal(res.branch, null, 'and there is no branch to offer');
+  assertCleanOriginal(repo);
+  assert.equal(sh(repo, ['branch', '--list', 'phantom/*']), '');
+});
+
 test('claude writes nothing: fallback report, unfixed, empty branch removed', async () => {
   const repo = makeRepo();
   const config = makeConfig(repo, { maxIterations: 1 });

@@ -222,7 +222,7 @@ function fallbackReport(ctx, result, extra = {}) {
  * independent checks.
  * @param {string} markdown
  * @param {{ status: string, testCommand: string|null, testOutput: string|null, iterations: number, durationMs: number,
- *           tokens: number|null, changedFiles: string[], branch: string|null, baseSha: string|null, baseBranch: string|null,
+ *           tokens: number|null, repro: object|null, command?: string, changedFiles: string[], branch: string|null, baseSha: string|null, baseBranch: string|null,
  *           restoreHint?: string|null, neverTouchViolations?: string[], testsPassed?: boolean|null }} info
  * @returns {string}
  */
@@ -234,8 +234,15 @@ function appendVerification(markdown, info) {
   const files = info.changedFiles && info.changedFiles.length ? info.changedFiles.map(code).join(', ') : 'none';
   const violations = info.neverTouchViolations || [];
   const audit = violations.length ? '❌ violated — ' + violations.map(code).join(', ') + ' (branch hard-reverted)' : '✅ clean';
+  const repro = info.repro;
+  const reproCell = !repro
+    ? '⏭ not re-run'
+    : repro.fixed
+      ? (repro.stillRunning ? '✅ still running after ' + Math.round(repro.durationMs / 1000) + 's, no crash' : '✅ exits 0')
+      : '❌ still exits ' + repro.code;
   const rows = [
     ['Tests run by phantom', testCell],
+    ['Crashed command re-run', reproCell + ' — ' + code(info.command || 'n/a')],
     ['Files changed', files],
     ['Never-touch audit', audit],
     ['Branch', info.branch
