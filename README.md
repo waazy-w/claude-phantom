@@ -191,7 +191,7 @@ Flags go before the command; everything after the command is passed through verb
 | `--model <m>` | Passed through as `claude --model <m>`. |
 | `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
 | `--no-prompt` | Never ask whether to merge or delete the fix branch; just print the commands. |
-| `--notify` | Desktop notification on crash and when recovery ends. |
+| `--notify` | Desktop notification on crash and when recovery ends. macOS needs a one-time permission — see [Desktop notification](#claude-code-integration). |
 | `--verbose` | Stream the session's progress lines. |
 | `--version`, `--help` | |
 
@@ -240,7 +240,17 @@ Claude Code cannot be interrupted from outside, so the chat message is always on
 
 **Status line.** `phantom-status` (installed with `phantom`) prints one line or nothing. States: `👻 fixing <cmd>…` (crash < 20 min, recovery running), `👻 fixed <cmd> → <branch>`, `👻 could not fix <cmd>`, `👻 dry run: <cmd>`, `👻 <cmd> crashed 25m ago` (no recovery after 20 min); `(+N)` for several unread. It clears when the hook reports the events or after `phantom-status --mark-read`. No status line yet: `"statusLine": { "type": "command", "command": "phantom-status" }` in `~/.claude/settings.json`. Already have one: copy [`examples/statusline.sh`](examples/statusline.sh), set `BASE` to your current command, point `statusLine.command` at the script — it replays Claude Code's stdin JSON to both.
 
-**Desktop notification.** `phantom --notify …` or `"notify": true`. macOS uses built-in `osascript` (Script Editor icon, since Apple does not let scripts pick their own); `brew install terminal-notifier` and phantom switches to it automatically with the phantom icon (allow it once in System Settings → Notifications). Linux uses `notify-send` (`libnotify-bin` / `libnotify`) with the icon. Windows: silently ignored. Best-effort, 4 s timeout, never delays a recovery.
+**Desktop notification.** `phantom --notify …` or `"notify": true`.
+
+**macOS requires a one-time permission, and gives no sign when it is missing.** Notifications go through built-in `osascript`, which macOS attributes to **Script Editor** (Apple does not let scripts choose their own identity). Until Script Editor is allowed, macOS drops the notification *and still reports success* — so `--notify` looks like it is working and nothing appears. Turn it on in **System Settings → Notifications → Script Editor → Allow Notifications**, then check with:
+
+```sh
+osascript -e 'display notification "test" with title "phantom"'
+```
+
+`brew install terminal-notifier` and phantom switches to it automatically, with the phantom icon instead of Script Editor's — that needs the same one-time permission, under Terminal Notifier.
+
+Linux uses `notify-send` (`libnotify-bin` / `libnotify`) with the icon. Windows: silently ignored. Best-effort, 4 s timeout, never delays a recovery.
 
 ## Demo GIF
 

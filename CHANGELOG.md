@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- `--notify` on macOS needs a one-time permission for Script Editor, and macOS drops the
+  notification *and reports success* until it is granted -- so the feature looks like it is
+  working while nothing appears. That requirement was buried in a parenthetical about
+  `terminal-notifier`, which is the optional path; it applies to the default one. Now
+  stated up front, with a one-line command to check it.
+
 ### Changed
 
 - A crash with nothing to go on is now declined instead of recovered. `phantom node -e
