@@ -45,7 +45,9 @@
     "test:watch": "node scripts/run-tests.js --watch",
     "lint": "node --check bin/phantom.js && node -e \"require('./src/cli.js')\"",
     "demo": "bash examples/crash-demo/setup-demo.sh",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "sync-site": "node scripts/sync-site.js",
+    "check-site": "node scripts/sync-site.js --check"
   },
   "engines": {
     "node": ">=18"

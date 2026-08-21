@@ -19,3 +19,7 @@ jobs:
       - run: git config --global user.name ci && git config --global user.email ci@example.com
       - run: npm run lint
       - run: npm test
+      # The site advertises a version and a test count; catch them drifting here
+      # rather than after a release has shipped past them.
+      - run: npm run check-site
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
