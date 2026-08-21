@@ -458,6 +458,8 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       if (!r.skipped) log.verbose('webhook ' + (r.ok ? 'delivered' : 'failed: ' + (r.error || r.status)));
     } catch { /* best-effort */ }
     await announce.announceRecovery(ctx, config, final, s.root);
+    // Asked last, so the webhook and the Claude Code briefing never wait on a human.
+    await offerBranchDecision(final, { ctx, s, config, flags, opts });
     return final;
   } catch (err) {
     if (err instanceof AbortedError || s.aborted) {
@@ -470,6 +472,44 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   } finally {
     removeSignalHandlers();
   }
+}
+
+/**
+ * Offer to merge or delete the fix branch, right where the user is looking.
+ *
+ * Only when there is a real decision to make and it is safe to act on: a
+ * verified fix, on a branch phantom actually left behind, with the user back
+ * on their own branch and a clean tree. Anything else -- an unfixed run, a dry
+ * run, a stash phantom could not pop, a non-interactive session -- falls
+ * through silently and leaves the banner's git commands as the only path.
+ * Declining is always free: the branch stays exactly as it is.
+ */
+async function offerBranchDecision(final, { ctx, s, config, flags, opts, ask = ui.ask }) {
+  if (config.promptOnFinish === false || flags.noPrompt || flags.dryRun) return;
+  if (final.status !== 'fixed' || !final.branch || s.stayed || s.stashed || s.onPhantomBranch) return;
+  if (git.isDirty(opts)) return;
+
+  const base = ctx.git.branch;
+  const answer = await ask('merge into ' + colors.bold(base) + ', delete it, or keep it for later? '
+    + colors.dim('[m/d/k]'), { keys: ['m', 'd', 'k'] });
+  if (answer === null || answer === 'k') return;
+
+  if (answer === 'd') {
+    if (git.deleteBranch(final.branch, opts)) log.info('deleted ' + final.branch + '; ' + base + ' is unchanged');
+    else log.warn('could not delete the branch; run: git branch -D ' + final.branch);
+    return;
+  }
+
+  const merged = git.mergeBranch(final.branch, opts);
+  if (merged.ok) {
+    log.info(colors.green('merged ' + final.branch + ' into ' + base));
+    log.info(colors.dim('undo with: git reset --hard ' + s.baseSha.slice(0, 10)));
+    return;
+  }
+  // A conflict leaves the repo mid-merge. Say so plainly rather than unwinding
+  // it: the user may want to resolve it, and --abort would discard that choice.
+  log.warn('merge did not complete cleanly: ' + String(merged.stderr || '').trim().split('\n')[0]);
+  log.warn('resolve it, or back out with: git merge --abort');
 }
 
 function printBanner(final, { ctx, s, restoreHint, durationMs, tokens }) {
@@ -492,4 +532,4 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens }) {
   ui.banner(lines, { color });
 }
 
-module.exports = { runRecovery, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, AbortedError };
+module.exports = { runRecovery, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };

@@ -139,6 +139,87 @@ test('spinner follows the stream TTY flag when not told otherwise', () => {
   } finally { ui.setStream(null); }
 });
 
+const { Readable } = require('node:stream');
+
+// A stdin stand-in that readline will treat as a real, non-TTY pipe.
+const keystrokes = (...lines) => Readable.from([lines.join('\n') + '\n']);
+
+test('ask resolves the chosen key, case-insensitively and trimmed', async () => {
+  const out = capture();
+  ui.setStream(out);
+  try {
+    const answer = await ui.ask('merge, delete, or keep? [m/d/k]', {
+      keys: ['m', 'd', 'k'], input: keystrokes('  M  '), enabled: true, timeoutMs: 0,
+    });
+    assert.strictEqual(answer, 'm');
+    assert.ok(out.text().includes('merge, delete, or keep? [m/d/k]'));
+  } finally { ui.setStream(null); }
+});
+
+test('ask re-asks on an unrecognised answer, then gives up rather than looping', async () => {
+  const out = capture();
+  ui.setStream(out);
+  try {
+    assert.strictEqual(await ui.ask('pick', {
+      keys: ['m', 'k'], input: keystrokes('yes', 'k'), enabled: true, timeoutMs: 0,
+    }), 'k', 'a good answer after a bad one still counts');
+    assert.ok(out.text().includes('please answer with one of: m, k'));
+
+    // More bad input than attempts, so giving up has to come from the attempt
+    // cap rather than from end-of-input -- otherwise this passes even with no
+    // cap at all, and a user who keeps fat-fingering never gets their shell back.
+    const noisy = capture();
+    ui.setStream(noisy);
+    assert.strictEqual(await ui.ask('pick', {
+      keys: ['m', 'k'], input: keystrokes('no', 'nope', 'never', 'still no', 'and again'),
+      enabled: true, timeoutMs: 0, attempts: 3,
+    }), null, 'bad answers give up instead of asking forever');
+    assert.strictEqual((noisy.text().match(/please answer with one of/g) || []).length, 2,
+      'asks 3 times total: two retries after the first bad answer');
+    assert.strictEqual((noisy.text().match(/pick/g) || []).length, 3, noisy.text());
+  } finally { ui.setStream(null); }
+});
+
+test('ask returns null -- change nothing -- whenever no answer can be had', async () => {
+  const out = capture();
+  ui.setStream(out);
+  try {
+    // Non-interactive: the whole point, so scripts and CI never block.
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: keystrokes('m'), enabled: false }), null);
+    assert.strictEqual(out.text(), '', 'a disabled prompt is never even printed');
+
+    // End of input, e.g. stdin closed or redirected from /dev/null.
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: Readable.from([]), enabled: true, timeoutMs: 0 }), null);
+
+    // A walked-away user must not hold the terminal forever.
+    const never = new Readable({ read() { /* silence */ } });
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: never, enabled: true, timeoutMs: 20 }), null);
+    never.push(null);
+  } finally { ui.setStream(null); }
+});
+
+test('ask defaults to interactive only when both stdin and stderr are TTYs', async () => {
+  const out = capture();
+  const tty = () => { const r = new Readable({ read() { this.push(null); } }); r.isTTY = true; return r; };
+  ui.setStream(out);
+  try {
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: keystrokes('m') }), null,
+      'a non-TTY stderr suppresses the prompt even with a TTY stdin');
+  } finally { ui.setStream(null); }
+
+  const ttyOut = capture();
+  ttyOut.isTTY = true;
+  ui.setStream(ttyOut);
+  try {
+    const piped = keystrokes('m');
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: piped, timeoutMs: 0 }), null,
+      'a piped stdin suppresses the prompt even with a TTY stderr');
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: tty(), timeoutMs: 20 }), null,
+      'both TTY: the prompt runs (this one ends at EOF)');
+    assert.ok(ttyOut.text().includes('q'), 'the question reached the terminal');
+  } finally { ui.setStream(null); }
+});
+
 test('setStream stops a live spinner so it cannot repaint over the next stream', () => {
   const first = capture();
   first.isTTY = true;

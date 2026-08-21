@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only on a TTY, and stays silent under `--verbose`, where the session already streams to
   the same stderr.
 
+- After a verified fix, phantom asks whether to merge the branch into your branch, delete
+  it, or keep it for later. It only asks when it can safely act on the answer: a verified
+  fix, a branch that still exists, the user back on their own branch, a clean tree, and no
+  stash left outstanding. Non-interactive sessions, `--no-prompt`, and
+  `"promptOnFinish": false` skip it, and every non-answer -- EOF, Ctrl+C, the two-minute
+  timeout, three unrecognised replies -- leaves the branch exactly as it was. A conflicting
+  merge is reported rather than unwound, since `--abort` would discard a resolvable merge.
+
 ### Changed
 
 - Recovery spend is reported in tokens rather than dollars, in the finish banner and in the

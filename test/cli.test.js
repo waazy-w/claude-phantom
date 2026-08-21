@@ -27,14 +27,14 @@ test('parseArgs: flags before the command, passthrough after it', () => {
 });
 
 test('parseArgs: -- separator, = values, all flags', () => {
-  const r = parseArgs(['--dry-run', '--allow-dirty', '--test=npm run check', '--max-minutes=9', '--model', 'm1', '--no-commit', '--', '--weird-cmd', '-x']);
+  const r = parseArgs(['--dry-run', '--allow-dirty', '--test=npm run check', '--max-minutes=9', '--model', 'm1', '--no-commit', '--no-prompt', '--', '--weird-cmd', '-x']);
   assert.strictEqual(r.command, '--weird-cmd');
   assert.deepStrictEqual(r.args, ['-x']);
   assert.deepStrictEqual(r.flags, {
     dryRun: true, allowDirty: true, test: 'npm run check', maxIterations: null, maxMinutes: 9,
-    model: 'm1', noCommit: true, notify: false, verbose: false, version: false, help: false,
+    model: 'm1', noCommit: true, noPrompt: true, notify: false, verbose: false, version: false, help: false,
   });
-  assert.deepStrictEqual(flagsToOverrides(r.flags), { testCommand: 'npm run check', maxIterations: undefined, maxMinutes: 9, model: 'm1', autoCommit: false, notify: undefined });
+  assert.deepStrictEqual(flagsToOverrides(r.flags), { testCommand: 'npm run check', maxIterations: undefined, maxMinutes: 9, model: 'm1', autoCommit: false, promptOnFinish: false, notify: undefined });
 });
 
 test('parseArgs: edge cases', () => {

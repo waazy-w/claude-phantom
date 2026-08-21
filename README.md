@@ -34,7 +34,7 @@ npm install -g claude-phantom
 phantom npm run dev            # any command; phantom is invisible until it crashes
 ```
 
-That is the whole setup. On a crash, phantom creates `phantom/fix-<slug>-<ts>`, fixes it there, verifies, writes `.phantom/reports/<ts>-<slug>.md`, and puts you back on your branch with `git diff` / `git merge` / `git branch -D` commands to review, accept, or discard the fix.
+That is the whole setup. On a crash, phantom creates `phantom/fix-<slug>-<ts>`, fixes it there, verifies, writes `.phantom/reports/<ts>-<slug>.md`, and puts you back on your branch with `git diff` / `git merge` / `git branch -D` commands to review, accept, or discard the fix. In an interactive terminal it then asks whether to merge the branch, delete it, or keep it for later; anywhere else â a pipe, CI, `--no-prompt` â it just prints the commands and exits.
 
 **Optional, one minute each** (details in [Claude Code integration](#claude-code-integration)):
 
@@ -186,6 +186,7 @@ Flags go before the command; everything after the command is passed through verb
 | `--max-minutes <n>` | Wall-clock cap for the recovery (default 15, max 120). |
 | `--model <m>` | Passed through as `claude --model <m>`. |
 | `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
+| `--no-prompt` | Never ask whether to merge or delete the fix branch; just print the commands. |
 | `--notify` | Desktop notification on crash and when recovery ends. |
 | `--verbose` | Stream the session's progress lines. |
 | `--version`, `--help` | |
@@ -207,6 +208,7 @@ Flags go before the command; everything after the command is passed through verb
   "notify": false,                // same as --notify
   "model": null,                  // claude --model
   "autoCommit": true,             // commit a successful fix on the phantom branch (never on yours)
+  "promptOnFinish": true,         // after a verified fix, ask whether to merge or delete the branch (TTY only)
   "reportDir": ".phantom/reports",// crash captures go to the sibling crashes/
   "ringBufferBytes": 262144,      // output kept for crash context
   "claudeBin": "claude"           // Claude Code executable

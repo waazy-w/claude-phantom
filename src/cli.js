@@ -23,6 +23,7 @@ const BOOL_FLAGS = {
   '--dry-run': 'dryRun',
   '--allow-dirty': 'allowDirty',
   '--no-commit': 'noCommit',
+  '--no-prompt': 'noPrompt',
   '--notify': 'notify',
   '--verbose': 'verbose',
   '--version': 'version',
@@ -49,7 +50,7 @@ const BOOL_FLAGS = {
 function defaultFlags() {
   return {
     dryRun: false, allowDirty: false, test: null, maxIterations: null, maxMinutes: null,
-    model: null, noCommit: false, notify: false, verbose: false, version: false, help: false,
+    model: null, noCommit: false, noPrompt: false, notify: false, verbose: false, version: false, help: false,
   };
 }
 
@@ -123,6 +124,7 @@ function helpText() {
     '  --max-minutes <n>     wall-clock cap for recovery, 1-120 (default 15)',
     '  --model <m>           model passed to claude --model',
     '  --no-commit           leave the fix uncommitted on the phantom branch',
+    '  --no-prompt           never ask whether to merge or delete the fix branch',
     '  --notify              desktop notification on crash and when recovery ends',
     '  --verbose             stream Claude progress and phantom debug output',
     '  --version             print version',
@@ -144,6 +146,7 @@ function flagsToOverrides(flags) {
     maxMinutes: flags.maxMinutes === null ? undefined : flags.maxMinutes,
     model: flags.model === null ? undefined : flags.model,
     autoCommit: flags.noCommit ? false : undefined,
+    promptOnFinish: flags.noPrompt ? false : undefined,
     notify: flags.notify ? true : undefined,
   };
 }

@@ -143,10 +143,66 @@ const log = {
   isVerbose: () => verbose,
 };
 
+/**
+ * Ask a single-letter question on stderr and read one line from stdin.
+ *
+ * Resolves to null -- "no answer, change nothing" -- whenever an answer cannot
+ * be had: a non-interactive session, end of input, Ctrl+C, or the timeout.
+ * Every caller must treat null as "leave everything alone", because phantom
+ * wraps commands that people run in scripts and CI, and a wrapper that blocks
+ * forever waiting on a human is worse than one that never asks.
+ *
+ * @param {string} question
+ * @param {{ keys: string[], input?: NodeJS.ReadStream, enabled?: boolean, timeoutMs?: number, attempts?: number }} opts
+ * @returns {Promise<string|null>} one of `keys`, lowercased, or null
+ */
+function ask(question, opts) {
+  const keys = opts.keys.map((k) => String(k).toLowerCase());
+  const input = opts.input || process.stdin;
+  const enabled = opts.enabled === undefined ? Boolean(input.isTTY && stream.isTTY) : Boolean(opts.enabled);
+  if (!enabled) return Promise.resolve(null);
+
+  const readline = require('node:readline');
+  const timeoutMs = opts.timeoutMs === undefined ? 120000 : opts.timeoutMs;
+  let attemptsLeft = Math.max(1, opts.attempts === undefined ? 3 : opts.attempts);
+
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input, output: stream, terminal: Boolean(input.isTTY) });
+    let settled = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => finish(null), timeoutMs) : null;
+
+    function finish(answer) {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      rl.close();
+      // readline leaves stdin flowing; without this phantom would not exit.
+      if (input.pause) input.pause();
+      resolve(answer);
+    }
+
+    function turn() {
+      rl.question(colors.dim('phantom ›') + ' ' + question + ' ', (raw) => {
+        const answer = String(raw).trim().toLowerCase();
+        const hit = keys.find((k) => answer === k || answer === k + '\n');
+        if (hit) return finish(hit);
+        attemptsLeft -= 1;
+        if (attemptsLeft <= 0) return finish(null);
+        write(colors.yellow('please answer with one of: ' + keys.join(', ')));
+        turn();
+      });
+    }
+
+    rl.on('close', () => finish(null));
+    rl.on('SIGINT', () => finish(null));
+    turn();
+  });
+}
+
 /** Test hook: redirect phantom's own output (defaults back to stderr). */
 function setStream(s) {
   if (live) live.stop();
   stream = s || process.stderr;
 }
 
-module.exports = { colors, banner, log, spinner, setStream, colorsEnabled, visibleLength };
+module.exports = { colors, banner, log, spinner, ask, setStream, colorsEnabled, visibleLength };

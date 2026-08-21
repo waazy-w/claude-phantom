@@ -21,6 +21,7 @@ test('defaults match the design doc', () => {
     notify: false,
     model: null,
     autoCommit: true,
+    promptOnFinish: true,
     reportDir: '.phantom/reports',
     ringBufferBytes: 262144,
     claudeBin: 'claude',

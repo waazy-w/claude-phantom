@@ -75,6 +75,15 @@ const branchExists = (name, opts) => run(['rev-parse', '--verify', '--quiet', 'r
 const deleteBranch = (name, opts) => run(['branch', '-D', name], opts).ok;
 
 /**
+ * Fast-forward or commit a merge of `name` into the current branch.
+ * `--no-edit` keeps git from opening an editor on a merge commit; a conflict
+ * leaves the repo mid-merge, which the caller reports rather than unwinding --
+ * silently running `git merge --abort` would throw away a resolvable merge.
+ * @returns {{ ok: boolean, stdout: string, stderr: string }}
+ */
+const mergeBranch = (name, opts) => run(['merge', '--no-edit', name], opts);
+
+/**
  * `git add -A && git commit -m <message>`. Supplies an identity and disables
  * signing/hooks when needed so it works on a fresh machine.
  * @returns {string|null} new HEAD sha, or null when nothing was committed
@@ -109,5 +118,5 @@ function ensureExcluded(root, dir, opts = {}) {
 module.exports = {
   git, isRepo, root, headSha, currentBranch, status, isDirty, recentCommits,
   createBranch, checkout, stashPush, stashPop, resetHard, cleanUntracked,
-  changedFilesSince, branchExists, deleteBranch, commitAll, ensureExcluded };
+  changedFilesSince, branchExists, deleteBranch, mergeBranch, commitAll, ensureExcluded };
 

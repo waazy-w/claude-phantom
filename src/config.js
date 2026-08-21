@@ -15,6 +15,7 @@ const git = require('./git');
  * @property {boolean} notify desktop notification on crash and when recovery ends
  * @property {string|null} model
  * @property {boolean} autoCommit
+ * @property {boolean} promptOnFinish ask whether to merge or delete the fix branch (interactive TTY only)
  * @property {string} reportDir
  * @property {number} ringBufferBytes
  * @property {string} claudeBin
@@ -31,6 +32,7 @@ const DEFAULTS = Object.freeze({
   notify: false,
   model: null,
   autoCommit: true,
+  promptOnFinish: true,
   reportDir: '.phantom/reports',
   ringBufferBytes: 262144,
   claudeBin: 'claude',
@@ -104,6 +106,7 @@ function validate(cfg) {
     throw new ConfigError('webhook must be an http(s) URL (got ' + JSON.stringify(cfg.webhook) + ')');
   }
   if (typeof cfg.autoCommit !== 'boolean') throw new ConfigError('autoCommit must be true or false');
+  if (typeof cfg.promptOnFinish !== 'boolean') throw new ConfigError('promptOnFinish must be true or false');
   if (typeof cfg.notify !== 'boolean') throw new ConfigError('notify must be true or false');
   if (typeof cfg.reportDir !== 'string' || !cfg.reportDir.trim()) throw new ConfigError('reportDir must be a non-empty string');
   if (typeof cfg.claudeBin !== 'string' || !cfg.claudeBin.trim()) throw new ConfigError('claudeBin must be a non-empty string');
