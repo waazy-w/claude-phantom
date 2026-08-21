@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows support.** The suite now runs green on `windows-latest` across Node 18/20/22/24,
+  and the leg gates the build like any other. Five real bugs came out of it, all of them
+  reachable by a Windows user today:
+  - `shell: true` on win32 (in both the wrapped command and the Claude session) let cmd.exe
+    re-parse the argv. Quoted arguments were mangled, phantom's own `--settings` JSON and
+    `--allowedTools` entries were shredded, and `ENOENT` never fired so a missing binary
+    exited 1 instead of 127. Only a resolved `.cmd`/`.bat` shim now goes through cmd, with
+    each argument escaped for it.
+  - The guard hook failed open. Stripping backslashes to undo shell escaping also destroyed
+    Windows path separators, so `C:\Users\me\.env` stopped matching the never-touch globs
+    and the guard permitted the write.
+  - A killed recovery kept running. With a `.cmd` shim the spawned process is cmd.exe and
+    the work is a grandchild, so `child.kill()` left it alive -- a `maxMinutes` timeout or a
+    Ctrl+C stopped watching but did not stop Claude. Now killed with `taskkill /T`.
+  - `git rev-parse --show-toplevel` prints `/` separators even on Windows, so comparisons
+    against `process.cwd()` never matched and stack-trace paths were made relative to the
+    wrong directory.
+  - CRLF was a publishing hazard: a package published from a Windows checkout would ship
+    `bin/*.js` whose `#!/usr/bin/env node` carried a CR, which POSIX kernels refuse to exec.
+    `.gitattributes` pins LF.
+
+  Six tests skip on Windows because the platform cannot express them: libuv maps
+  SIGTERM/SIGINT/SIGKILL onto an unconditional `TerminateProcess`, so a killed child never
+  reports a signal and a target's own handler cannot run. `phantom dir` and other cmd
+  built-ins are no longer wrapped, matching POSIX behaviour.
+
+### Added
+
+- `test/windows-spawn.test.js`: the cmd.exe argument escaping is exercised by modelling
+  cmd's parser and the MSVC CRT rules and round-tripping every escaped argument back, since
+  CI never reaches that branch.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added

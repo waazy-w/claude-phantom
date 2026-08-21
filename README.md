@@ -251,7 +251,7 @@ Claude Code cannot be interrupted from outside, so the chat message is always on
 - **Non-deterministic.** Claude may fail; the branch is then marked `unfixed`/`timeout`, you are back on your branch, and the report says what was tried and why verification failed.
 - **Uses your Claude billing** for every recovery.
 - **Best on Node/JS with a test runner.** Patching works for anything Claude Code can edit, but verification needs a `testCommand` and the crash heuristics are tuned for Node traces first.
-- **Windows is best-effort.** Developed and tested on macOS and Linux; signal semantics and path matching are untested there, and the guard hook is skipped (shell quoting differs), leaving deny rules and the audit.
+- **Windows runs the full suite in CI**, alongside macOS and Linux, on Node 18/20/22/24. Six tests are skipped there because Windows cannot express them: libuv maps SIGTERM/SIGINT/SIGKILL onto an unconditional `TerminateProcess`, so a killed child never reports a signal and a target's own handler cannot run. Two real differences remain: the guard hook is skipped (its command is a POSIX shell line), leaving the deny rules and the post-run audit as the safety net; and phantom wraps programs, not shell lines, so `phantom dir` and other `cmd` built-ins do not work — the same as on POSIX.
 - **No sandbox** (see above) and the session inherits your environment variables.
 - **Redaction is pattern-based**; unusual secret formats get through.
 - **Never-touch files outside git cannot be restored** — phantom detects the change, discards the session's work, and tells you, but never read the old contents.
