@@ -4,6 +4,9 @@
  * All phantom output goes to stderr. stdout belongs to the wrapped command.
  */
 
+const fs = require('node:fs');
+const tty = require('node:tty');
+
 const ESC = '\u001b';
 let stream = process.stderr;
 let verbose = false;
@@ -144,6 +147,33 @@ const log = {
 };
 
 /**
+ * Where to read the answer from.
+ *
+ * Not process.stdin: the recovery session is a long-lived child that takes the
+ * controlling terminal for itself, and once it exits the inherited stdin no
+ * longer delivers a line -- readline sees end-of-input and closes, so the
+ * prompt printed and vanished without waiting. /dev/tty is a fresh handle on
+ * the same terminal and is unaffected by whatever the child did. Falling back
+ * to stdin covers Windows, which has no /dev/tty, and any session with no
+ * controlling terminal.
+ * @returns {{ input: NodeJS.ReadableStream, close: () => void }}
+ */
+function openTerminal() {
+  let fd = null;
+  try {
+    fd = fs.openSync('/dev/tty', 'r');
+    // tty.ReadStream, not fs.createReadStream: readline needs setRawMode to turn
+    // off the terminal driver's own echo while it does its own. A plain file
+    // stream cannot, so both echo and every keystroke appears twice.
+    const input = new tty.ReadStream(fd);
+    return { input, close: () => { try { input.destroy(); } catch { /* already closed */ } } };
+  } catch {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+    return { input: process.stdin, close: () => {} };
+  }
+}
+
+/**
  * Ask a single-letter question on stderr and read one line from stdin.
  *
  * Resolves to null -- "no answer, change nothing" -- whenever an answer cannot
@@ -158,10 +188,15 @@ const log = {
  */
 function ask(question, opts) {
   const keys = opts.keys.map((k) => String(k).toLowerCase());
-  const input = opts.input || process.stdin;
-  const enabled = opts.enabled === undefined ? Boolean(input.isTTY && stream.isTTY) : Boolean(opts.enabled);
+  // Decide interactivity from the real descriptors, before choosing what to read
+  // from: a piped stdin means a script or CI, and must never see a prompt --
+  // even though the controlling terminal below would happily supply one.
+  const enabled = opts.enabled === undefined
+    ? Boolean(process.stdin.isTTY && stream.isTTY)
+    : Boolean(opts.enabled);
   if (!enabled) return Promise.resolve(null);
 
+  const { input, close } = opts.input ? { input: opts.input, close: () => {} } : openTerminal();
   const readline = require('node:readline');
   const timeoutMs = opts.timeoutMs === undefined ? 120000 : opts.timeoutMs;
   let attemptsLeft = Math.max(1, opts.attempts === undefined ? 3 : opts.attempts);
@@ -176,8 +211,9 @@ function ask(question, opts) {
       settled = true;
       if (timer) clearTimeout(timer);
       rl.close();
-      // readline leaves stdin flowing; without this phantom would not exit.
+      // readline leaves the stream flowing; without this phantom would not exit.
       if (input.pause) input.pause();
+      close();
       resolve(answer);
     }
 
@@ -205,4 +241,4 @@ function setStream(s) {
   stream = s || process.stderr;
 }
 
-module.exports = { colors, banner, log, spinner, ask, setStream, colorsEnabled, visibleLength };
+module.exports = { colors, banner, log, spinner, ask, openTerminal, setStream, colorsEnabled, visibleLength };

@@ -198,26 +198,39 @@ test('ask returns null -- change nothing -- whenever no answer can be had', asyn
   } finally { ui.setStream(null); }
 });
 
-test('ask defaults to interactive only when both stdin and stderr are TTYs', async () => {
+test('ask decides interactivity from the real descriptors, not the stream it reads', async () => {
+  // The two are deliberately separate. Whether to prompt at all is answered by
+  // process.stdin/stderr -- a piped stdin means a script or CI and must never
+  // see a prompt. WHERE the answer is read from is a different question, and in
+  // production it is /dev/tty, because the recovery session leaves the inherited
+  // stdin unable to deliver a line.
+  const realStdinIsTty = process.stdin.isTTY;
   const out = capture();
-  const tty = () => { const r = new Readable({ read() { this.push(null); } }); r.isTTY = true; return r; };
   ui.setStream(out);
   try {
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     assert.strictEqual(await ui.ask('q', { keys: ['m'], input: keystrokes('m') }), null,
       'a non-TTY stderr suppresses the prompt even with a TTY stdin');
+    assert.strictEqual(out.text(), '', 'and prints nothing at all');
   } finally { ui.setStream(null); }
 
   const ttyOut = capture();
   ttyOut.isTTY = true;
   ui.setStream(ttyOut);
   try {
-    const piped = keystrokes('m');
-    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: piped, timeoutMs: 0 }), null,
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: keystrokes('m'), timeoutMs: 0 }), null,
       'a piped stdin suppresses the prompt even with a TTY stderr');
-    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: tty(), timeoutMs: 20 }), null,
-      'both TTY: the prompt runs (this one ends at EOF)');
+    assert.strictEqual(ttyOut.text(), '', 'and prints nothing at all');
+
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    assert.strictEqual(await ui.ask('q', { keys: ['m'], input: keystrokes('m'), timeoutMs: 0 }), 'm',
+      'both TTY: the prompt runs and reads from the stream it was given');
     assert.ok(ttyOut.text().includes('q'), 'the question reached the terminal');
-  } finally { ui.setStream(null); }
+  } finally {
+    ui.setStream(null);
+    Object.defineProperty(process.stdin, 'isTTY', { value: realStdinIsTty, configurable: true });
+  }
 });
 
 test('setStream stops a live spinner so it cannot repaint over the next stream', () => {
@@ -239,4 +252,24 @@ test('setStream stops a live spinner so it cannot repaint over the next stream',
     ui.setStream(null);
     if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
   }
+});
+
+test('openTerminal yields a readable handle, or falls back to stdin without throwing', () => {
+  // In production this is /dev/tty, because the recovery session leaves the
+  // inherited stdin unable to deliver a line. Under a test runner or in CI there
+  // may be no controlling terminal at all, and the fallback is what runs -- so
+  // this asserts the contract both branches must satisfy rather than which one
+  // was taken. The /dev/tty branch itself is only observable from a real
+  // terminal; a real recovery is what verifies it.
+  const { input, close } = ui.openTerminal();
+  try {
+    assert.ok(input && typeof input.on === 'function', 'a readable stream either way');
+    if (input !== process.stdin) {
+      assert.strictEqual(input.isTTY, true, '/dev/tty is marked as a terminal so callers can trust it');
+    }
+  } finally {
+    assert.doesNotThrow(close, 'closing is safe even when nothing was opened');
+    assert.doesNotThrow(close, 'and is idempotent');
+  }
+  assert.notStrictEqual(process.stdin.destroyed, true, 'the fallback must never destroy the real stdin');
 });
