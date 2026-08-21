@@ -309,6 +309,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let lastClaude = null;
     let lastTest = null;
     let tokens = 0;
+    let cached = 0;
     let timedOut = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -336,6 +337,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       checkAborted();
       lastClaude = res.json;
       tokens += report.sumTokens(res.json.usage);
+      cached += report.cachedTokens(res.json.usage);
       if (res.timedOut) { timedOut = true; log.warn('claude session hit the ' + config.maxMinutes + ' minute cap'); break; }
       if (res.json.session_id) { sessionId = res.json.session_id; s.sessionId = sessionId; log.verbose('claude session ' + sessionId); }
       if (res.json.is_error) log.warn('claude ended with an error: ' + String(res.json.result || res.json.subtype || '').split('\n')[0].slice(0, 200));
@@ -418,7 +420,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = report.fallbackReport(ctx, { status, branch: reportBranch, reportPath: s.reportPath, iterations, message }, { claudeResult: lastClaude, testOutput: lastTest, baseSha: s.baseSha, durationMs });
     }
     const modelUsed = config.model || (lastClaude && lastClaude.modelUsage && Object.keys(lastClaude.modelUsage)[0]) || null;
-    const modelUsage = [modelUsed, report.formatTokens(tokens)].filter(Boolean).join(' · ');
+    const modelUsage = [modelUsed, report.formatTokens(tokens, cached)].filter(Boolean).join(' · ');
     md = report.renderTemplate(md, {
       iterations, duration: report.formatDuration(durationMs), modelUsage, status: report.statusBadge(status), session: report.sessionCell(sessionId),
       branch: reportBranch || '(none)', baseSha: s.baseSha.slice(0, 10), baseBranch: ctx.git.branch, reportPath: s.reportPath,
@@ -429,7 +431,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       md = md.replace(/\*\*Status:\*\*[^\n]*/, '**Status:** ' + report.statusBadge(status) + ' (set by phantom: ' + message + ')');
     }
     md = report.appendVerification(md, {
-      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, changedFiles, sessionId,
+      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId,
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
     });
     fs.writeFileSync(s.reportPath, md);
@@ -459,7 +461,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     const final = result(status, message);
     // 10. Banner + webhook
-    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens });
+    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached });
     try {
       const r = await notify.sendWebhook(config.webhook, notify.buildPayload(ctx, final));
       if (!r.skipped) log.verbose('webhook ' + (r.ok ? 'delivered' : 'failed: ' + (r.error || r.status)));
@@ -519,8 +521,8 @@ async function offerBranchDecision(final, { ctx, s, config, flags, opts, ask = u
   log.warn('resolve it, or back out with: git merge --abort');
 }
 
-function printBanner(final, { ctx, s, restoreHint, durationMs, tokens }) {
-  const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (tokens ? ' · ' + report.formatTokens(tokens) : ''))];
+function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached }) {
+  const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (tokens ? ' · ' + report.formatTokens(tokens, cached) : ''))];
   lines.push(final.message);
   if (final.branch) {
     lines.push('');

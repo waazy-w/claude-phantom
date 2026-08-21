@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The token figure now shows what was actually new: `468.2k tokens (12.2k new · 456k
+  cached)`. A bare total is honest but uninterpretable -- a one-iteration recovery reports
+  something like 468k, which reads as enormous until you know ~97% of it is the same system
+  prompt and the same files re-read every turn and billed as cache reads at a fraction of
+  the input rate.
+
 ## [0.3.0] - 2026-08-21
 
 ### Fixed

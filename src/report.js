@@ -86,11 +86,35 @@ function formatDuration(ms) {
  * recovery is a different amount of money for different people. Tokens are the
  * quantity phantom actually consumed and are true for everyone.
  */
-function formatTokens(tokens) {
+function scale(n) {
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+}
+
+/**
+ * Recovery spend, with the split that makes the total readable.
+ *
+ * A bare total is honest but uninterpretable: a one-iteration recovery reports
+ * something like 468k tokens, which reads as enormous until you know ~97% of it
+ * is the same system prompt and the same files being re-read every turn, billed
+ * as cache reads at a fraction of the input rate. Showing what was actually new
+ * is the difference between a number the reader can judge and one they cannot.
+ *
+ * @param {number} tokens total across the session
+ * @param {number} [cached] of which were cache reads
+ */
+function formatTokens(tokens, cached) {
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return 'n/a';
-  if (tokens < 1000) return tokens + ' tokens';
-  if (tokens < 1e6) return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
-  return (tokens / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M tokens';
+  const total = scale(tokens) + ' tokens';
+  if (!Number.isFinite(cached) || cached <= 0 || cached > tokens) return total;
+  return total + ' (' + scale(tokens - cached) + ' new · ' + scale(cached) + ' cached)';
+}
+
+/** Of a session's tokens, the ones that were cache reads -- the discounted majority. */
+function cachedTokens(usage) {
+  if (!usage || typeof usage !== 'object') return 0;
+  return Number.isFinite(usage.cache_read_input_tokens) ? usage.cache_read_input_tokens : 0;
 }
 
 /**
@@ -131,7 +155,7 @@ function fallbackReport(ctx, result, extra = {}) {
   const branch = result.branch || '(no branch)';
   const summary = ctx.errorLine || summarizeExit(ctx);
   const modelUsage = claude
-    ? [claude.model || null, formatTokens(sumTokens(claude.usage)), claude.num_turns !== undefined ? claude.num_turns + ' turns' : null].filter(Boolean).join(' · ')
+    ? [claude.model || null, formatTokens(sumTokens(claude.usage), cachedTokens(claude.usage)), claude.num_turns !== undefined ? claude.num_turns + ' turns' : null].filter(Boolean).join(' · ')
     : 'n/a';
   const lines = [
     '# 👻 Phantom post-mortem — ' + summary,
@@ -219,7 +243,7 @@ function appendVerification(markdown, info) {
       : info.status === 'dry-run' ? 'none (dry run)' : 'none (no changes were made; the empty branch was removed)'],
     ['Iterations used', String(info.iterations || 0)],
     ['Wall clock', formatDuration(info.durationMs)],
-    ['Tokens', formatTokens(info.tokens)],
+    ['Tokens', formatTokens(info.tokens, info.cachedTokens)],
     ['Session', sessionCell(info.sessionId)],
   ];
   if (info.restoreHint) rows.push(['Stashed changes', 'restore with ' + code(info.restoreHint)]);
@@ -255,5 +279,5 @@ function appendVerification(markdown, info) {
 
 module.exports = {
   renderTemplate, fallbackReport, appendVerification, trimLines, trimBytes, loadTemplate,
-  statusBadge, formatDuration, formatTokens, sumTokens, sessionCell, VERIFICATION_MARKER, TEMPLATE_PATH,
+  statusBadge, formatDuration, formatTokens, sumTokens, cachedTokens, sessionCell, VERIFICATION_MARKER, TEMPLATE_PATH,
 };

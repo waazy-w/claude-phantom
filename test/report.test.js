@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   renderTemplate, fallbackReport, appendVerification, trimLines, trimBytes, loadTemplate, VERIFICATION_MARKER,
-  formatTokens, sumTokens,
+  formatTokens, sumTokens, cachedTokens,
 } = require('../src/report');
 
 const ctx = {
@@ -156,4 +156,25 @@ test('no rendered report mentions a dollar amount', () => {
   assert.match(md, /12\.2k tokens/);
   assert.ok(!/\$\d/.test(md), 'a dollar figure would misstate what the user was charged');
   assert.ok(!/cost/i.test(md.split('## Verification (independent)')[1] || ''), md);
+});
+
+test('cachedTokens picks out the discounted half of the total', () => {
+  assert.equal(cachedTokens({ input_tokens: 10, cache_read_input_tokens: 456000 }), 456000);
+  assert.equal(cachedTokens({ input_tokens: 10 }), 0, 'a session with no cache reads');
+  for (const empty of [undefined, null, {}, 'nope', 7]) assert.equal(cachedTokens(empty), 0);
+});
+
+test('formatTokens shows what was new, so the total can be judged', () => {
+  // The number this exists for: a one-iteration recovery reports ~468k tokens,
+  // which reads as enormous until you see that all but 12k of it is the same
+  // prompt and files re-read each turn and billed as discounted cache reads.
+  assert.equal(formatTokens(468200, 456000), '468.2k tokens (12.2k new · 456k cached)');
+  assert.equal(formatTokens(1000, 900), '1k tokens (100 new · 900 cached)');
+
+  // Without a usable cached figure it stays a plain total rather than guessing.
+  assert.equal(formatTokens(12200), '12.2k tokens');
+  assert.equal(formatTokens(12200, 0), '12.2k tokens', 'nothing was cached');
+  assert.equal(formatTokens(12200, 99999), '12.2k tokens', 'cached cannot exceed the total');
+  assert.equal(formatTokens(12200, NaN), '12.2k tokens');
+  assert.equal(formatTokens(null, 500), 'n/a');
 });
