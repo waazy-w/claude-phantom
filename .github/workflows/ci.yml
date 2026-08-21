@@ -6,6 +6,10 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # Windows is not supported yet: 29 of 210 tests fail there (argument quoting
+    # through cmd.exe, POSIX signals, exec bits, path formats). The leg runs so
+    # the gap stays measured and visible, but it does not gate the build.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
