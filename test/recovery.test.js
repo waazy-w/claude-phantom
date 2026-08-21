@@ -55,6 +55,9 @@ function makeRepo() {
   fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n');
   sh(dir, ['init', '-q', '-b', 'main']);
   sh(dir, ['config', 'user.email', 't@example.com']);
+  // Git for Windows defaults core.autocrlf=true in its system config, so a
+  // checkout rewrites LF to CRLF and every byte-exact assertion here drifts.
+  sh(dir, ['config', 'core.autocrlf', 'false']);
   sh(dir, ['config', 'user.name', 'tester']);
   sh(dir, ['add', '-A']);
   sh(dir, ['commit', '-q', '-m', 'initial']);
