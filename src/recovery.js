@@ -422,12 +422,18 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let changedFiles = [];
     let violations = [];
     const snapDiff = audit.diffSnapshots(neverTouchBefore, audit.snapshotNeverTouch(s.root, config.neverTouch, { skipPrefixes: [phantomDir] }));
-    const unrestorable = [...snapDiff.modified, ...snapDiff.added, ...snapDiff.removed];
+    // A tracked file that changed on disk is put back by the hard reset below,
+    // so it is a violation but not a loss. Only a file git never knew about --
+    // a gitignored .env is the usual one -- is beyond recovery, and saying
+    // "phantom cannot restore this" about a file it just restored is a false
+    // alarm on the most alarming message phantom has.
+    const snapChanged = [...snapDiff.modified, ...snapDiff.added, ...snapDiff.removed];
+    const unrestorable = snapChanged.filter((f) => !git.isTracked(f, opts));
     if (!dryRun) {
       changedFiles = git.changedFilesSince(s.baseSha, opts).filter((f) => !f.startsWith(phantomDir + '/'));
       violations = changedFiles.filter((f) => isNeverTouch(f, config.neverTouch));
     }
-    for (const f of unrestorable) if (!violations.includes(f)) violations.push(f);
+    for (const f of snapChanged) if (!violations.includes(f)) violations.push(f);
     if (unrestorable.length) {
       log.error('never-touch files changed outside git during recovery: ' + unrestorable.join(', ') + ' — phantom cannot restore these; inspect them now');
     }

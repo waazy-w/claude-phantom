@@ -86,6 +86,13 @@ const changedFilesSince = (sha, opts) => {
   return [...all].sort();
 };
 
+/**
+ * Is `file` in the index? Decides whether a change to it can be undone by the
+ * hard reset, or whether it is genuinely beyond phantom's reach -- the
+ * difference between a scary warning being true and being a false alarm.
+ */
+const isTracked = (file, opts) => Boolean(git(['ls-files', '--', file], opts));
+
 const branchExists = (name, opts) => run(['rev-parse', '--verify', '--quiet', 'refs/heads/' + name], opts).ok;
 const deleteBranch = (name, opts) => run(['branch', '-D', name], opts).ok;
 
@@ -133,5 +140,5 @@ function ensureExcluded(root, dir, opts = {}) {
 module.exports = {
   git, isRepo, root, headSha, currentBranch, status, isDirty, recentCommits,
   createBranch, checkout, stashPush, stashPop, resetHard, cleanUntracked,
-  changedFilesSince, branchExists, deleteBranch, mergeBranch, commitAll, ensureExcluded };
+  changedFilesSince, branchExists, isTracked, deleteBranch, mergeBranch, commitAll, ensureExcluded };
 

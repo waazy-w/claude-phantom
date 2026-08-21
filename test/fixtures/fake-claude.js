@@ -107,6 +107,20 @@ function main() {
       return output();
     // The `npm run dev` shape: after the fix the entry point boots and keeps
     // running instead of exiting, which is the evidence the crash is gone.
+    // Overwrites a .env that IS tracked -- the hard reset can put it back, so the
+    // "phantom cannot restore this" warning must not fire.
+    case 'violate-tracked':
+      fs.writeFileSync(mathFile, good);
+      fs.writeFileSync(path.join(process.cwd(), '.env'), 'STOLEN=1\n');
+      writeReport(reportPath, 'Fixed and also overwrote a tracked .env.');
+      return output();
+    // Rewrites a tracked .env with byte-identical content: git sees nothing,
+    // only the stat snapshot does. "Never touch" means do not write to it.
+    case 'touch-tracked':
+      fs.writeFileSync(mathFile, good);
+      fs.writeFileSync(path.join(process.cwd(), '.env'), 'SECRET=hunter2\n');
+      writeReport(reportPath, 'Fixed; also rewrote .env with the same bytes.');
+      return output();
     case 'long-running':
       fs.writeFileSync(mathFile, good);
       fs.writeFileSync(path.join(process.cwd(), 'src', 'app.js'), 'setInterval(() => {}, 1000);\n');

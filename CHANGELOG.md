@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Set `"verifyCommand": false` to skip the re-run if the command has side effects you do
   not want repeated.
 
+- **A false alarm on the most alarming message phantom has.** The stat-snapshot audit flags
+  any never-touch file that changed on disk, and phantom reported "phantom cannot restore
+  these; inspect them now" for a tracked `.env` that the hard reset put back a second
+  later. It now checks whether git tracks the file: only a file git never knew about -- a
+  gitignored `.env` is the usual one -- is genuinely beyond recovery. A tracked one is
+  still a violation and still reverts the branch, but is reported as restored, because it
+  was.
+
 ## [0.3.2] - 2026-08-21
 
 ### Fixed

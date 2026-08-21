@@ -259,6 +259,49 @@ test('claude writes nothing: fallback report, unfixed, empty branch removed', as
   assert.match(md, /none \(no changes were made/);
 });
 
+test('writing a never-touch file is a violation even when the bytes do not change', async () => {
+  // git diff sees nothing here, so only the stat snapshot catches it. That is
+  // deliberate: "never touch" is about what the session is allowed to write to,
+  // not about whether it managed to alter anything. A session that opens .env
+  // for writing has done the thing the rail exists to prevent.
+  const repo = makeRepo();
+  fs.writeFileSync(path.join(repo, '.env'), 'SECRET=hunter2\n');
+  sh(repo, ['add', '-A']);
+  sh(repo, ['-c', 'user.name=t', '-c', 'user.email=t@e.com', 'commit', '-qm', 'track .env']);
+
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('touch-tracked'), exit: () => {} });
+
+  assert.equal(res.status, 'error');
+  assert.match(res.message, /never-touch violation \(\.env\)/);
+  assert.doesNotMatch(res.message, /cannot restore/);
+  assert.equal(fs.readFileSync(path.join(repo, '.env'), 'utf8'), 'SECRET=hunter2\n');
+  assertCleanOriginal(repo);
+});
+
+test('a tracked never-touch file is restored, and not reported as unrestorable', async () => {
+  // Found by running phantom for real. The stat-snapshot audit flags any
+  // never-touch file that changed on disk, and phantom told the user it "cannot
+  // restore" a tracked .env that the hard reset put back seconds later --
+  // a false alarm on the most alarming message it has.
+  const repo = makeRepo();
+  fs.writeFileSync(path.join(repo, '.env'), 'SECRET=hunter2\n');
+  sh(repo, ['add', '-A']);
+  sh(repo, ['-c', 'user.name=t', '-c', 'user.email=t@e.com', 'commit', '-qm', 'track .env']);
+
+  const config = makeConfig(repo);
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('violate-tracked'), exit: () => {} });
+
+  assert.equal(res.status, 'error', 'still a violation -- it was written to');
+  assert.match(res.message, /never-touch violation \(\.env\)/);
+  assert.doesNotMatch(res.message, /cannot restore/, 'but it was restorable, and was restored');
+  assert.match(res.message, /branch reverted/);
+  assert.equal(fs.readFileSync(path.join(repo, '.env'), 'utf8'), 'SECRET=hunter2\n', 'contents are back');
+  assertCleanOriginal(repo);
+});
+
 test('never-touch violation hard-reverts the branch and reports error', async () => {
   const repo = makeRepo();
   const config = makeConfig(repo);
