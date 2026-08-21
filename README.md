@@ -237,7 +237,7 @@ Claude Code cannot be interrupted from outside, so the chat message is always on
 
 ## Demo GIF
 
-`npm run demo` copies `examples/crash-demo` into a temp git repo and runs `phantom npm start`; the app crashes on a guest order and phantom recovers it in one or two iterations. It is a real Claude Code session (~90 s), so it consumes your plan's usage allowance — or API credit if `ANTHROPIC_API_KEY` is set. To re-record the demo: `npm link && PHANTOM_REPO="$PWD" vhs docs/demo.tape` writes an MP4 master, then `bash docs/make-demo-gif.sh` renders `docs/demo.gif` from it (compressing only the stretch where Claude is working, so the GIF stays ~25 s). Rendering is free and repeatable; only the recording costs usage.
+`npm run demo` copies `examples/crash-demo` into a temp git repo and runs `phantom npm start`; the app crashes on a guest order and phantom recovers it in one or two iterations. It is a real Claude Code session (~90 s), so it consumes your plan's usage allowance — or API credit if `ANTHROPIC_API_KEY` is set. To re-record the demo: `npm link && PHANTOM_REPO="$PWD" vhs docs/demo.tape` writes an MP4 master, then `node docs/make-demo-gif.js` renders `docs/demo.gif` from it (compressing only the stretch where Claude is working, so the GIF stays ~25 s). Rendering is free and repeatable; only the recording costs usage.
 
 ## Known limitations
 

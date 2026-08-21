@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-21
+
+### Fixed
+
+- README pointed at `bash docs/make-demo-gif.sh` for re-rendering the demo; the script is
+  `docs/make-demo-gif.js` and runs under node. Following the old line failed outright.
+- The ring-buffer memory test collected once before sampling, which measured V8's
+  background ArrayBuffer sweeper rather than what the ring retains and failed
+  intermittently. It now collects twice and asserts a one-chunk bound.
+
 ### Added
 
+- `test/ansi.test.js`: direct coverage for `src/ansi.js`, the last module without a test
+  file. Pins both OSC terminators, the null/undefined path, and the rejoining of a path or
+  secret split mid-token by an escape -- the case the redactor depends on.
 - `docs/make-demo-gif.js`: renders `docs/demo.gif` from the `docs/demo.mp4` master that
   `docs/demo.tape` records. It caps every visually static span (found with ffmpeg's
   `freezedetect`) so the long wait while Claude works is compressed while the readable
@@ -62,5 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/waazy-w/claude-phantom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/waazy-w/claude-phantom/releases/tag/v0.1.0
