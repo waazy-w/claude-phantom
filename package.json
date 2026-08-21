@@ -1,6 +1,6 @@
 {
   "name": "claude-phantom",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Autonomous crash-recovery agent for your terminal. Wrap any command; if it crashes, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies, and leaves a post-mortem.",
   "keywords": [
     "claude",
