@@ -9,6 +9,7 @@ const { execFileSync } = require('node:child_process');
 const { Writable } = require('node:stream');
 const ui = require('../src/ui');
 const git = require('../src/git');
+const { stripAnsi } = require('../src/ansi');
 const { gatherContext } = require('../src/context');
 const { runRecovery, parseClaudeOutput, ensureExcluded, commitMessage, offerBranchDecision } = require('../src/recovery');
 
@@ -872,7 +873,14 @@ test("phantom's own instructions, run verbatim, give the user their work back", 
   assert.equal(sh(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), res.branch, 'precondition: left on the fix branch');
   assert.equal(sh(repo, ['stash', 'list']).split('\n').filter(Boolean).length, 1, 'precondition: snapshot outstanding');
 
-  const advice = (out.match(/go back with: (.+)/) || [])[1];
+  // Strip colour first. npm exports FORCE_COLOR=1 to lifecycle scripts when
+  // stdout is a terminal, so `npm test` in a real shell captures the reset
+  // sequence that closes the warning line -- and it lands right after the sha,
+  // making the pasted command `git stash apply <sha>\u001b[39m`, which git
+  // rejects as "not a valid reference". A piped run and CI both have colour off
+  // and never see it. A user copying from their terminal copies the visible
+  // text, which is what this reconstructs.
+  const advice = (stripAnsi(out).match(/go back with: (.+)/) || [])[1];
   assert.ok(advice, 'phantom told the user how to get back');
   // `git stash pop <sha>` and `git stash drop <sha>` reject a raw commit
   // ("is not a stash reference"), so advice built on them cannot run at all.
