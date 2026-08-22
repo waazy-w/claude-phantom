@@ -877,7 +877,13 @@ test("phantom's own instructions, run verbatim, give the user their work back", 
   // `git stash pop <sha>` and `git stash drop <sha>` reject a raw commit
   // ("is not a stash reference"), so advice built on them cannot run at all.
   assert.doesNotMatch(advice, /git stash (?:pop|drop) [0-9a-f]{7,}/, 'the advice uses a form git accepts');
-  execFileSync('/bin/sh', ['-c', advice], { cwd: repo, stdio: 'pipe' });
+  // The point is that the exact string phantom printed runs as typed, so it
+  // goes through a shell -- and cmd.exe is the shell a Windows user pastes it
+  // into. It chains with && the same way, so the one advice string serves both.
+  const [shell, shellArgs] = process.platform === 'win32'
+    ? [process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', advice]]
+    : ['/bin/sh', ['-c', advice]];
+  execFileSync(shell, shellArgs, { cwd: repo, stdio: 'pipe' });
 
   assert.equal(sh(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', 'back where they started');
   assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /MY LOCAL EDIT/,
