@@ -86,7 +86,16 @@ function readStdin() {
   return new Promise((resolve) => {
     let data = '';
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(data); } };
+    // Release stdin as well as resolving. process.exit(0) used to cover for a
+    // still-referenced stdin handle keeping the event loop alive; dropping the
+    // handle here is what lets the process end on its own, which is what makes
+    // the flush below safe.
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      try { process.stdin.pause(); process.stdin.unref(); } catch { /* not a pipe */ }
+      resolve(data);
+    };
     if (process.stdin.isTTY) return done();
     setTimeout(done, STDIN_TIMEOUT_MS).unref();
     process.stdin.setEncoding('utf8');
@@ -103,9 +112,23 @@ function startDir(input) {
   return process.cwd();
 }
 
+/**
+ * Write to stdout and wait for the bytes to actually leave.
+ *
+ * Claude Code reads the status line through a pipe, and writes to a pipe are
+ * asynchronous on Windows (and past the ~64 KiB buffer everywhere). Calling
+ * process.exit() straight after a write discards whatever libuv still has
+ * queued -- silently, with no error -- so the segment simply never appears.
+ * This is the same defect already fixed in plugin/hooks/phantom-events.js;
+ * this binary never got the same treatment.
+ */
+function write(text) {
+  return new Promise((resolve) => { process.stdout.write(text, () => resolve()); });
+}
+
 async function main(argv) {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(HELP + '\n');
+    await write(HELP + '\n');
     return;
   }
   let input = {};
@@ -126,13 +149,13 @@ async function main(argv) {
   }
   const now = Date.now();
   const line = render(events.readUnread(root, { now }), now);
-  if (line) process.stdout.write(line + '\n');
+  if (line) await write(line + '\n');
 }
 
 if (require.main === module) {
   main(process.argv.slice(2))
     .catch(() => { /* print nothing on error */ })
-    .then(() => process.exit(0));
+    .then(() => { process.exitCode = 0; });
 }
 
 module.exports = { render, shortCmd, startDir, FIXING_MS, CMD_MAX };

@@ -5,6 +5,7 @@ const path = require('node:path');
 const { summarizeExit } = require('./crash');
 const { redact } = require('./redact');
 const { trimLines, trimBytes, loadTemplate, VERIFICATION_MARKER } = require('./report');
+const { commandLineOf } = require('./context');
 
 const SKILL_PATH = path.join(__dirname, '..', 'plugin', 'skills', 'crash-recovery', 'SKILL.md');
 const CONTEXT_BYTE_BUDGET = 24 * 1024;
@@ -38,7 +39,7 @@ function fence(text, lang = 'text') {
 }
 
 function describeCommand(ctx) {
-  return [ctx.command, ...(ctx.args || [])].join(' ');
+  return commandLineOf(ctx);
 }
 
 function gitSection(ctx) {

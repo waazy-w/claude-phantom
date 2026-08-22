@@ -61,6 +61,26 @@ function gitInfo(cwd) {
 }
 
 /**
+ * The crashed command as a single string, safe to display.
+ *
+ * `command` and `args` stay raw on the context because reproduce() re-runs
+ * them, so anything that SHOWS the command has to come through here instead:
+ * a wrapped command routinely carries credentials in argv
+ * (`node server.js --api-key=...`), and those went verbatim into the model
+ * prompt, the post-mortem, the crash JSON, the desktop notification and the
+ * webhook POST -- the one destination that leaves the machine. The tail beside
+ * them was scrubbed all along; argv simply was never passed through redact().
+ *
+ * @param {{ command: string, args?: string[], commandLine?: string }} ctx
+ * @returns {string}
+ */
+const commandLineOf = (ctx) => (
+  typeof ctx.commandLine === 'string'
+    ? ctx.commandLine
+    : redact([ctx.command, ...(ctx.args || [])].join(' ')).text
+);
+
+/**
  * Builds the crash context. The output tail is scrubbed of secret-looking
  * values here, at the source, so nothing downstream (crash JSON on disk,
  * prompt, fallback report, webhook) ever sees the raw value.
@@ -90,6 +110,7 @@ function gatherContext(runResult, config) {
   return {
     ...runResult,
     tail,
+    commandLine: redact([runResult.command, ...(runResult.args || [])].join(' ')).text,
     crashed: true,
     redactions: scrubbed.redactions,
     stackTrace,
@@ -103,4 +124,4 @@ function gatherContext(runResult, config) {
   };
 }
 
-module.exports = { gatherContext };
+module.exports = { gatherContext, commandLineOf };

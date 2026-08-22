@@ -1,6 +1,7 @@
 'use strict';
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const { commandLineOf } = require('./context');
 
 /**
  * POST a JSON summary to the configured webhook. Best-effort: never throws,
@@ -41,7 +42,7 @@ function buildPayload(ctx, result) {
   return {
     event: 'phantom.recovery',
     status: result.status,
-    command: [ctx.command, ...ctx.args].join(' '),
+    command: commandLineOf(ctx),
     error: ctx.errorLine,
     exit: ctx.exitCode,
     signal: ctx.signal,

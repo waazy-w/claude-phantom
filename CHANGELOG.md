@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-22
+
+Found by an audit that ran the code in places the suite never had: behind a pipe, in a
+worktree, with a second stash on the stack, and with credentials in argv. Every fix below
+has a regression test, and every test was mutation-checked against the 0.3.5 behaviour.
+
+### Fixed
+
+- **Following phantom's own recovery instructions destroyed the user's work.** When
+  phantom left you on the fix branch it skipped popping your snapshot stash — the guard
+  read `!s.onPhantomBranch`, which is still true there — and then printed
+  `git stash && git checkout main`. Running that put phantom's *unverified* patch on the
+  branch phantom had just called untouched, lost the tree state you had, and buried your
+  real work under a stash you were told you had already restored. The stash is now
+  restored on that path, and the printed sequence is verified by a test that executes it
+  verbatim and asserts the user gets their work back.
+- **`phantom -- cmd | head` (or `| grep -q`, or quitting the pager) hung forever.** On
+  EPIPE the pump called `src.unpipe(dest)`, which also clears flowing mode; the
+  ring-buffer `data` listener does not bring it back, so the child's stdout was never
+  drained again and a child that writes synchronously to fd 1 — most programs that are
+  not node — blocked on a full pipe with nothing to settle the run.
+- **Phantom was unusable in a git worktree or submodule.** `.git` is a file there, so
+  `ensureExcluded` threw `ENOTDIR`, swallowed it, and never excluded `.phantom/` — leaving
+  `git status --porcelain` permanently dirty and every crash refused with "uncommitted
+  changes". Resolved through `git rev-parse --git-common-dir`.
+- **`git stash pop` took whatever was on top of the stack.** A stash pushed by another
+  shell, a `git pull --autostash`, or a second phantom run meant phantom restored a
+  stranger's content over the tree and reported success, with the real work still buried.
+  The snapshot is now recorded by commit sha and resolved to its current position
+  immediately before the pop.
+- **Cleanup claimed "working tree restored" without checking.** `resetHard` and `checkout`
+  return booleans that were discarded, so a reset blocked by a stale `index.lock`, or a
+  checkout refused because the branch is open in another worktree, was announced as a
+  successful restore. Each step now reports what actually happened, and failures name the
+  branch you are still on and where your work is.
+- **Failing after the stash was taken orphaned the whole working tree.** Early returns
+  between the stash and step 9 left the try block without running cleanup, so the user's
+  uncommitted work vanished while the final message named an unrelated cause.
+- **SIGHUP was not handled.** Closing a terminal tab or dropping an SSH session left the
+  user on the phantom branch with a live stash, an orphaned `claude` process, and no
+  output at all. Recovery now listens for it as `watcher.js` always has, and exits 129.
+- **A conflicted stash pop was reported as a retryable failure.** git has already written
+  the merge and kept the entry, so "run `git stash pop`" could not work. Conflicts are now
+  named as conflicts, with the markers and the drop command called out.
+- **`Authorization:` headers were published, not redacted.** `auth` is one of the
+  sensitive key names, so the generic `KEY=value` rule matched first and treated the
+  *scheme* as the secret — `Authorization: [REDACTED] sk0pq7Rt...` — scrubbing the one
+  part that was never sensitive. The dedicated header rule below it was unreachable.
+- **The crashed command's argv was never redacted.** `node server.js --api-key=...` went
+  verbatim into the prompt sent to the model, the post-mortem, the crash JSON, the desktop
+  notification and the webhook POST — the one destination that leaves the machine. `redact`
+  would have caught it; it was simply never called. The raw argv is still kept for
+  reproduction.
+- Credentials in URL query strings (`?api_key=`, `?access_token=`) and underscore-form
+  tokens (`sk_live_...`) are now redacted, and a quoted multi-word secret is redacted
+  whole instead of losing only its first word.
+- **`phantom-status` and the guard hook called `process.exit()` after writing.** Pipe
+  writes finish asynchronously on Windows, so the status segment could vanish and a guard
+  denial could arrive with an empty reason. Both now set `process.exitCode`; a structural
+  test enforces the rule across every executable that writes to stdout or stderr.
+- **A first run without a Claude Code login reported nothing at all.** The error string is
+  built as `'' + '\n' + stderr`, and phantom took line 0 — the empty string — so the user
+  saw "claude ended with an error:" followed by nothing, watched the test suite run three
+  times, and was then told the session made no changes. Claude's actual message
+  ("Please run /login") was on the next line.
+
+## [0.3.5] - 2026-08-22
+
+### Fixed
+
+- The guard's fallback matcher had no `{a,b}` alternation, so `neverTouch: ["*.{pem,key}"]`
+  went entirely unenforced whenever the fallback was live.
+- On Windows the guard hook was never registered — its command line used POSIX
+  `VAR=value` prefix syntax, which cmd.exe cannot parse — so `Bash(cat *)` reached `.env`
+  unguarded on one of the three supported platforms. The payload now travels in a file.
+- The plugin's `UserPromptSubmit` hook wrote to a pipe and then called `process.exit(0)`,
+  truncating anything past ~64 KiB to invalid JSON *after* advancing the read cursor, so
+  crash events were lost permanently.
+- `describeEvent` threw on a non-coercible command, leaving the cursor unadvanced and
+  every later prompt in that repo failing identically.
+- `reproTimeoutMs` was read from the wrong object, hard-wiring the timeout to 30 s — one
+  test was 30.3 s of a 45 s suite and green by accident.
+- A failed commit blamed `--no-commit` even when `autoCommit` was on.
+- Raw output is now stripped of terminal escapes before parsing and redaction.
+
 ## [0.3.4] - 2026-08-21
 
 ### Fixed
@@ -241,7 +326,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/waazy-w/claude-phantom/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/waazy-w/claude-phantom/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/waazy-w/claude-phantom/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/waazy-w/claude-phantom/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/waazy-w/claude-phantom/compare/v0.3.1...v0.3.2

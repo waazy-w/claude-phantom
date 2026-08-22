@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { commandLineOf } = require('./context');
 
 /**
  * Crash/recovery event log: `.phantom/events.jsonl` at the repo root.
@@ -154,7 +155,7 @@ function findRoot(start) {
   return null;
 }
 
-function commandOf(ctx) { return [ctx.command, ...(ctx.args || [])].join(' '); }
+function commandOf(ctx) { return commandLineOf(ctx); }
 
 /** @param {object} ctx crash context from gatherContext */
 function crashEvent(ctx) {

@@ -68,12 +68,68 @@ const recentCommits = (n, opts) => {
 const createBranch = (name, opts) => run(['checkout', '-b', name], opts).ok;
 const checkout = (name, opts) => run(['checkout', name], opts).ok;
 
-/** @returns {boolean} true when something was stashed */
+/**
+ * Stash the working tree (including untracked files) and return the stash
+ * *commit sha*, not a boolean.
+ *
+ * The sha is the whole point. `git stash pop` with no argument pops the top of
+ * the stack, which is only phantom's entry if nothing else pushed one in the
+ * meantime -- and plenty does: the user in another shell, a `git pull
+ * --autostash`, a second phantom run in the same repo. When that happens the
+ * unqualified pop writes someone else's content over the user's tree and
+ * reports success, leaving the real work buried at stash@{1}.
+ *
+ * @returns {string|null} stash commit sha, or null when nothing was stashed
+ */
 const stashPush = (message, opts) => {
   const r = run(['stash', 'push', '-u', '-m', message], opts);
-  return r.ok && !/No local changes to save/.test(r.stdout);
+  if (!r.ok || /No local changes to save/.test(r.stdout)) return null;
+  return git(['rev-parse', '--verify', '--quiet', 'stash@{0}'], opts) || null;
 };
-const stashPop = (opts) => run(['stash', 'pop'], opts).ok;
+
+/**
+ * @returns {number} current position of stash commit `ref`, or -1 if it is gone.
+ * Positions shift as entries are pushed and popped, which is exactly why the
+ * sha is what gets stored and the index is looked up fresh at pop time.
+ */
+const stashIndexOf = (ref, opts) => {
+  if (!ref) return -1;
+  const list = git(['stash', 'list', '--format=%H'], opts);
+  return list ? list.split('\n').indexOf(ref) : -1;
+};
+
+/** @returns {boolean} true when `ref` is still on the stash stack */
+const stashExists = (ref, opts) => stashIndexOf(ref, opts) !== -1;
+
+/**
+ * Pop a specific stash commit, identified by the sha stashPush returned.
+ *
+ * `git stash pop` only accepts a `stash@{n}` reference, and n moves as entries
+ * are pushed and popped -- so the sha is resolved to a current index here,
+ * immediately before the pop. That is what makes this safe against a stack that
+ * changed underneath us: without it, a bare pop takes whatever is on top, which
+ * may belong to the user's other shell or a second phantom run.
+ *
+ * A conflicted pop is NOT a retryable failure: git has already written the
+ * merge into the working tree and kept the entry on the stack, so telling the
+ * user to "run git stash pop" (as phantom used to) hands them a command that
+ * cannot succeed. `conflicted` lets the caller say what actually happened.
+ *
+ * @returns {{ ok: boolean, conflicted: boolean, missing: boolean, stderr: string }}
+ */
+const stashPop = (ref, opts) => {
+  // Tolerate the old (opts) call shape rather than feeding an object to git.
+  if (ref && typeof ref === 'object') { opts = ref; ref = null; }
+  let target = 'stash@{0}';
+  if (ref) {
+    const i = stashIndexOf(ref, opts);
+    if (i === -1) return { ok: false, conflicted: false, missing: true, stderr: 'stash entry ' + ref.slice(0, 10) + ' is no longer on the stack' };
+    target = 'stash@{' + i + '}';
+  }
+  const r = run(['stash', 'pop', target], opts);
+  const conflicted = !r.ok && /conflict/i.test(r.stderr + r.stdout);
+  return { ok: r.ok, conflicted, missing: false, stderr: r.stderr };
+};
 const resetHard = (sha, opts) => run(['reset', '--hard', sha], opts).ok;
 /** `git clean -fd` (never -x: ignored files such as .env are left alone). */
 const cleanUntracked = (opts) => run(['clean', '-fd'], opts).ok;
@@ -125,7 +181,16 @@ const commitAll = (message, opts) => {
  */
 function ensureExcluded(root, dir, opts = {}) {
   const entry = dir.replace(/\/+$/, '') + '/';
-  const infoDir = path.join(root, '.git', 'info');
+  // `.git` is only a directory in a plain clone. In a linked worktree and in a
+  // submodule it is a *file* pointing elsewhere, so joining '.git/info' onto
+  // the root and calling mkdirSync throws ENOTDIR -- which this function then
+  // swallows, leaving .phantom/ unexcluded. From there `git status --porcelain`
+  // is permanently non-empty and phantom refuses every crash it is asked to
+  // recover from. --git-common-dir resolves all three layouts (and points at
+  // the parent's .git for a worktree, which is where exclude belongs).
+  const common = git(['rev-parse', '--git-common-dir'], { cwd: root });
+  const gitDir = common ? path.resolve(root, common) : path.join(root, '.git');
+  const infoDir = path.join(gitDir, 'info');
   const file = path.join(infoDir, 'exclude');
   try {
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -139,6 +204,6 @@ function ensureExcluded(root, dir, opts = {}) {
 
 module.exports = {
   git, isRepo, root, headSha, currentBranch, status, isDirty, recentCommits,
-  createBranch, checkout, stashPush, stashPop, resetHard, cleanUntracked,
+  createBranch, checkout, stashPush, stashPop, stashExists, stashIndexOf, resetHard, cleanUntracked,
   changedFilesSince, branchExists, isTracked, deleteBranch, mergeBranch, commitAll, ensureExcluded };
 

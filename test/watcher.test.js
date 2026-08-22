@@ -255,3 +255,30 @@ test('windowsSafeSpawn decides on the platform first, then on what the name reso
     Object.defineProperty(process, 'platform', real);
   }
 });
+
+test('a consumer that quits early does not strand the child (phantom -- cmd | head)', async () => {
+  // `| head -1`, `| grep -q`, quitting the pager: the reader goes away, our
+  // write to it gets EPIPE, and pump() stops writing to that destination.
+  //
+  // Stopping the WRITE is correct; stopping the READ is not. unpipe() also
+  // clears flowing mode -- and the ring-buffer 'data' listener is not enough to
+  // bring it back -- so without an explicit resume() the child's stdout is never
+  // drained again. A child that writes synchronously to fd 1 (which is most
+  // programs that are not node) then blocks forever on a full pipe and the run
+  // never settles. Not a broken pipe: a hang, until the user notices and kills it.
+  const dest = new Writable({
+    write(c, e, cb) { cb(new Error('EPIPE')); },
+  });
+  const started = Date.now();
+  const r = await runCommand(node, [
+    '-e',
+    // writeSync, deliberately: console.log buffers in memory and would exit
+    // cleanly even with the pipe stalled, hiding the bug.
+    'const fs=require("node:fs");for(let i=0;i<200000;i++)fs.writeSync(1,"line "+i+" "+"x".repeat(120)+"\\n");',
+  ], { stdout: dest, stderr: sink() });
+
+  assert.strictEqual(r.exitCode, 0, 'the child ran to completion instead of blocking on a full pipe');
+  assert.ok(Date.now() - started < 20000, 'and settled promptly');
+  // The tail is still captured: we stopped writing to the dead consumer, not reading.
+  assert.ok(r.tail.includes('line 0') || r.tail.includes('line '), 'output still reached the ring buffer');
+});

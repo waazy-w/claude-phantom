@@ -73,10 +73,12 @@ test('branch, stash, commit, reset and clean round trip', () => {
   const cwd = { cwd: dir };
   const base = git.headSha(cwd);
 
-  assert.strictEqual(git.stashPush('nothing', cwd), false);
+  assert.strictEqual(git.stashPush('nothing', cwd), null, 'nothing to stash reports null, not a sha');
   fs.writeFileSync(path.join(dir, 'a.txt'), 'dirty\n');
   fs.writeFileSync(path.join(dir, 'untracked.txt'), 'u\n');
-  assert.strictEqual(git.stashPush('phantom-snapshot', cwd), true);
+  const stashRef = git.stashPush('phantom-snapshot', cwd);
+  assert.match(stashRef, /^[0-9a-f]{40}$/, 'stashPush returns the stash commit sha');
+  assert.strictEqual(git.stashExists(stashRef, cwd), true);
   assert.strictEqual(git.isDirty(cwd), false);
   assert.ok(!fs.existsSync(path.join(dir, 'untracked.txt')));
 
@@ -104,9 +106,56 @@ test('branch, stash, commit, reset and clean round trip', () => {
   assert.strictEqual(git.checkout('main', cwd), true);
   assert.strictEqual(git.deleteBranch('phantom/fix-x', cwd), true);
   assert.strictEqual(git.branchExists('phantom/fix-x', cwd), false);
-  assert.strictEqual(git.stashPop(cwd), true);
+  assert.deepStrictEqual(git.stashPop(stashRef, cwd), { ok: true, conflicted: false, missing: false, stderr: '' });
   assert.strictEqual(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'dirty\n');
   assert.ok(fs.existsSync(path.join(dir, 'untracked.txt')));
+  assert.strictEqual(git.stashExists(stashRef, cwd), false, 'popping removes it from the stack');
+});
+
+test('stashPop restores phantom\'s own entry, not whatever landed on top', () => {
+  // The stack moves under phantom all the time: the user stashing in another
+  // shell, `git pull --autostash`, a second phantom run. A bare `git stash pop`
+  // takes the top entry, writes someone else's content over the tree, and
+  // reports success -- leaving the real work buried one level down.
+  const dir = tmpRepo();
+  const cwd = { cwd: dir };
+  const file = path.join(dir, 'a.txt');
+
+  fs.writeFileSync(file, 'MY PRECIOUS WORK\n');
+  const mine = git.stashPush('phantom-snapshot', cwd);
+  assert.match(mine, /^[0-9a-f]{40}$/);
+
+  // Somebody else pushes a stash while phantom is busy.
+  fs.writeFileSync(file, 'UNRELATED SCRATCH\n');
+  const theirs = git.stashPush('other-shell', cwd);
+  assert.notStrictEqual(theirs, mine);
+
+  const pop = git.stashPop(mine, cwd);
+  assert.strictEqual(pop.ok, true);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'MY PRECIOUS WORK\n',
+    'the user gets their own work back, not the entry that happened to be on top');
+  assert.strictEqual(git.stashExists(theirs, cwd), true, "the other shell's stash is left alone");
+  assert.strictEqual(git.stashExists(mine, cwd), false);
+});
+
+test('a conflicted pop is reported as conflicted, not as a retryable failure', () => {
+  // git has already written the merge into the tree and kept the entry on the
+  // stack, so "run git stash pop" is advice that cannot work.
+  const dir = tmpRepo();
+  const cwd = { cwd: dir };
+  const file = path.join(dir, 'a.txt');
+  const g = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+
+  fs.writeFileSync(file, 'MINE\n');
+  const ref = git.stashPush('phantom-snapshot', cwd);
+  fs.writeFileSync(file, 'THEIRS\n');
+  g('commit', '-qam', 'diverge');
+
+  const pop = git.stashPop(ref, cwd);
+  assert.strictEqual(pop.ok, false);
+  assert.strictEqual(pop.conflicted, true, 'the caller can tell this apart from a plain failure');
+  assert.match(fs.readFileSync(file, 'utf8'), /<<<<<<</, 'the tree really does carry markers now');
+  assert.strictEqual(git.stashExists(ref, cwd), true, 'and the entry is still on the stack');
 });
 
 test('commitAll works without a configured identity', () => {
@@ -128,5 +177,35 @@ test('commitAll works without a configured identity', () => {
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);
+  }
+});
+
+test('ensureExcluded works where .git is a file, not a directory', () => {
+  // A linked worktree and a submodule both have a `.git` FILE pointing
+  // elsewhere. Joining '.git/info' onto the root and calling mkdirSync throws
+  // ENOTDIR there, and ensureExcluded swallows its own errors -- so .phantom/
+  // stayed untracked-and-visible, `git status --porcelain` was permanently
+  // non-empty, and phantom refused every crash in that tree with "uncommitted
+  // changes". Silent, total, and only in the layout no test covered.
+  const main = tmpRepo();
+  const wt = path.join(path.dirname(main), path.basename(main) + '-wt');
+  execFileSync('git', ['worktree', 'add', '-q', wt, '-b', 'feature'], { cwd: main, stdio: 'pipe' });
+  try {
+    assert.ok(fs.statSync(path.join(wt, '.git')).isFile(), 'precondition: .git is a file here');
+
+    const errors = [];
+    git.ensureExcluded(wt, '.phantom', { onError: (e) => errors.push(e.message) });
+    assert.deepStrictEqual(errors, [], 'no error, silent or otherwise');
+
+    // The rule belongs in the shared git dir, which is the main checkout's.
+    const exclude = path.join(main, '.git', 'info', 'exclude');
+    assert.match(fs.readFileSync(exclude, 'utf8'), /^\.phantom\/$/m);
+
+    // What it is all for: phantom's own directory must not make the tree dirty.
+    fs.mkdirSync(path.join(wt, '.phantom'), { recursive: true });
+    fs.writeFileSync(path.join(wt, '.phantom', 'crash.json'), '{}');
+    assert.strictEqual(git.isDirty({ cwd: wt }), false, 'phantom can still run here');
+  } finally {
+    execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: main, stdio: 'pipe' });
   }
 });

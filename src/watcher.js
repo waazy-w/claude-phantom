@@ -133,7 +133,12 @@ function runCommand(command, args = [], opts = {}) {
       if (!src) return;
       src.on('data', (chunk) => ring.push(chunk));
       src.pipe(dest, { end: false });
-      const onDestError = () => { src.unpipe(dest); };
+      // unpipe() also clears flowing mode, and the ring-buffer 'data' listener
+      // above is not enough to restore it -- so without the resume() the child's
+      // stdout is never drained again, the child blocks on a full pipe, and the
+      // run never settles. That is every `phantom -- cmd | head`, `| grep -q`,
+      // or quitting the pager: a hang, not a broken pipe.
+      const onDestError = () => { src.unpipe(dest); src.resume(); };
       dest.once('error', onDestError);
       src.once('end', () => dest.removeListener('error', onDestError));
     };

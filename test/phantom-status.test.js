@@ -164,3 +164,32 @@ test('missing or invalid stdin is handled', () => {
   assert.equal(run({ cwd: tmp() }), '');
   assert.equal(run({ rawStdin: '{"workspace":{"current_dir":42}}', cwd: tmp() }), '');
 });
+
+test('no executable calls process.exit() after writing to stdout', () => {
+  // Writes to a pipe complete asynchronously on Windows, and past the ~64 KiB
+  // buffer everywhere; process.exit() discards whatever libuv still has queued,
+  // silently. plugin/hooks/phantom-events.js shipped that bug and lost crash
+  // briefings to it. The rule that actually prevents a recurrence is structural
+  // -- set process.exitCode and let the process end once the bytes are out --
+  // because the truncation itself is unreachable from realistic input here
+  // (shortCmd caps a status line at CMD_MAX) and so cannot be tested directly.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const root = path.join(__dirname, '..');
+  const files = [
+    'bin/phantom-status.js',
+    'bin/phantom.js',
+    'src/guard-hook.js',
+    'plugin/hooks/phantom-events.js',
+  ];
+  for (const rel of files) {
+    const src = fs.readFileSync(path.join(root, rel), 'utf8');
+    const writes = /process\.(stdout|stderr)\.write\(/.test(src);
+    if (!writes) continue;
+    const offenders = src.split('\n')
+      .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+      .filter(({ line }) => /(?:^|[^.\w])process\.exit\(/.test(line) && !line.startsWith('//') && !line.startsWith('*'));
+    assert.deepStrictEqual(offenders, [],
+      rel + ' writes to stdout/stderr, so it must set process.exitCode rather than call process.exit()');
+  }
+});

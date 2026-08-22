@@ -673,9 +673,12 @@ test('a snapshot stash that cannot be popped is reported, never silently forgott
     runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('drop-stash'), exit: () => {} }));
 
   assert.equal(res.status, 'fixed', res.message);
-  assert.match(out, /could not pop the stash automatically; run: git stash pop/);
+  // `git stash pop <sha>` and `git stash drop <sha>` are rejected by git ("is
+  // not a stash reference"); `apply` is the one form that takes a commit, and
+  // it still reaches a dropped entry before gc collects it.
+  assert.match(out, /snapshot stash was dropped while phantom was working.*git stash apply [0-9a-f]{10}/);
   // And the banner keeps pointing at it after the summary, where it is read.
-  assert.match(out, /your stashed changes: git stash pop/);
+  assert.match(out, /your stashed changes: git stash apply [0-9a-f]{10}/);
   assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
 });
 
@@ -727,4 +730,159 @@ test('a branch that vanishes while the prompt waits is not claimed as deleted', 
   assert.equal(asked.length, 1);
   assert.match(out, /could not delete the branch; run: git branch -D phantom\/fix-x/);
   assert.doesNotMatch(out, /deleted phantom\/fix-x/);
+});
+
+test('SIGHUP is handled like the other signals: the tree is restored, not abandoned', async () => {
+  // Closing a terminal tab or dropping an SSH session sends SIGHUP. Without a
+  // handler phantom simply died mid-recovery, leaving the user on the phantom
+  // branch with a live stash, an orphaned claude process, and no message at
+  // all. watcher.js has always forwarded all three signals; recovery listened
+  // for two of them.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxMinutes: 5 });
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// my local edit\n');
+  const ctx = makeCtx(repo, config);
+  const exits = [];
+  let ctl;
+  const promise = runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('sleep'), exit: (c) => exits.push(c), onStart: (c) => { ctl = c; } });
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(sh(repo, ['stash', 'list']).split('\n').filter(Boolean).length, 1);
+  // Registration is the actual defect: calling ctl.abort() directly works
+  // whether or not anything ever listened for the signal, so asserting only on
+  // the abort path passes against a phantom that ignores SIGHUP entirely.
+  assert.equal(process.listenerCount('SIGHUP'), 1, 'recovery is listening for SIGHUP while it runs');
+
+  await ctl.abort('SIGHUP');
+  const res = await promise;
+
+  assert.equal(res.status, 'aborted');
+  assert.deepEqual(exits, [129], '128 + SIGHUP, distinct from SIGINT and SIGTERM');
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
+  assert.equal(sh(repo, ['stash', 'list']), '', 'the snapshot was popped, not left behind');
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /my local edit/);
+  assert.equal(sh(repo, ['branch', '--list', 'phantom/*']), '');
+  assert.equal(process.listenerCount('SIGHUP'), 0, 'and the handler is removed again');
+});
+
+test('phantom restores its own stash even when another one landed on top', async () => {
+  // `git stash pop` takes the top of the stack. When something else pushed
+  // while phantom was working, the unqualified pop wrote a stranger's content
+  // over the user's tree, set stashed = false, and reported success -- with the
+  // real work still buried one level down.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxMinutes: 5 });
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// my local edit\n');
+  const ctx = makeCtx(repo, config);
+
+  const res = await runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('rival-stash'), exit: () => {} });
+
+  assert.equal(res.status, 'fixed', res.message);
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /my local edit/,
+    "the user's own edit came back");
+  assert.ok(!fs.existsSync(path.join(repo, 'rival.txt')), "and the other stash's file was not written over the tree");
+  const stashes = sh(repo, ['stash', 'list']).split('\n').filter(Boolean);
+  assert.equal(stashes.length, 1, "the other shell's stash is still on the stack, untouched");
+  assert.match(stashes[0], /someone-elses-work/);
+});
+
+test('failing after the stash is taken still restores the user, and says so', async () => {
+  // Every `return result(...)` between the stash and step 9 used to return
+  // straight out of the try block without running cleanup(), so the user's
+  // entire working tree was left stashed and unmentioned while the final
+  // message named an unrelated cause.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxMinutes: 5 });
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// my local edit\n');
+  // A branch named `phantom` makes refs/heads/phantom a file, so no
+  // refs/heads/phantom/fix-... can be created underneath it.
+  sh(repo, ['branch', 'phantom']);
+  const ctx = makeCtx(repo, config);
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('fix'), exit: () => {} }));
+
+  assert.equal(res.status, 'error');
+  assert.match(res.message, /could not create branch/);
+  assert.equal(sh(repo, ['stash', 'list']), '', 'the snapshot was popped on the way out');
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /my local edit/,
+    'the user still has the work they started with');
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
+  assert.match(out, /could not create branch/, 'and the reason reached the user');
+});
+
+test('a secret in the crashed command\'s argv is redacted everywhere it is shown', async () => {
+  // The tail was scrubbed from the first release; argv never was. A wrapped
+  // command routinely carries credentials -- `node server.js --api-key=...`,
+  // `DATABASE_URL=postgres://user:pw@host npm start` -- and that string went
+  // verbatim into the prompt sent to the model, the post-mortem on disk, the
+  // crash JSON, the desktop notification, and the webhook POST, which is the
+  // one destination that leaves the machine entirely.
+  const repo = makeRepo();
+  const secret = 'sk-ant-api03-zyxwvutsrqponmlkjihgfedcba';
+  const dbPassword = 'Hunter2Hunter2';
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const now = Date.now();
+  const ctx = gatherContext({
+    command: 'node',
+    args: ['src/app.js', '--api-key=' + secret, '--db', 'postgres://app:' + dbPassword + '@db/x'],
+    cwd: repo, exitCode: 1, signal: null, startedAt: now - 1, endedAt: now, durationMs: 1,
+    tail: 'TypeError: boom\n    at add (' + repo + '/src/math.js:2:42)\n', userInterrupted: false,
+  }, config);
+
+  // Raw argv survives on the context, because reproduce() has to re-run it.
+  assert.ok(ctx.args.some((a) => a.includes(secret)), 'the real argv is still there to re-run');
+  assert.ok(!ctx.commandLine.includes(secret), 'but the displayable form is scrubbed');
+  assert.ok(!ctx.commandLine.includes(dbPassword));
+
+  const logFile = path.join(repo, '.phantom', 'fake.log');
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('noop', logFile), exit: () => {} });
+
+  const report = fs.readFileSync(res.reportPath, 'utf8');
+  const events = fs.readFileSync(path.join(repo, '.phantom', 'events.jsonl'), 'utf8');
+  const prompt = fs.readFileSync(logFile, 'utf8');       // what the session was handed
+  const payload = JSON.stringify(require('../src/notify').buildPayload(ctx, res));
+
+  for (const [what, text] of [['report', report], ['events', events], ['prompt log', prompt], ['webhook payload', payload]]) {
+    assert.ok(!text.includes(secret), 'api key leaked into the ' + what);
+    assert.ok(!text.includes(dbPassword), 'db password leaked into the ' + what);
+  }
+  assert.match(payload, /\[REDACTED\]/, 'and the webhook still describes the command');
+});
+
+test("phantom's own instructions, run verbatim, give the user their work back", async () => {
+  // The bug this pins was the worst one phantom has had. When it leaves you on
+  // the fix branch it used to skip popping your snapshot (the guard read
+  // `!s.onPhantomBranch`, which is still true here) and then print
+  // `git stash && git checkout main`. Following that: your tree state is lost,
+  // phantom's UNVERIFIED patch lands on the branch it just called untouched,
+  // and your real work stays buried under the stash you were told you popped.
+  //
+  // So the test does what a user does -- it executes the printed advice.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { autoCommit: false, maxIterations: 1 });
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// MY LOCAL EDIT\n');
+  const ctx = makeCtx(repo, config);
+  const mainSha = sh(repo, ['rev-parse', 'main']);
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, { allowDirty: true }, { env: scenarioEnv('fix'), exit: () => {} }));
+
+  assert.equal(res.status, 'fixed');
+  assert.equal(sh(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), res.branch, 'precondition: left on the fix branch');
+  assert.equal(sh(repo, ['stash', 'list']).split('\n').filter(Boolean).length, 1, 'precondition: snapshot outstanding');
+
+  const advice = (out.match(/go back with: (.+)/) || [])[1];
+  assert.ok(advice, 'phantom told the user how to get back');
+  // `git stash pop <sha>` and `git stash drop <sha>` reject a raw commit
+  // ("is not a stash reference"), so advice built on them cannot run at all.
+  assert.doesNotMatch(advice, /git stash (?:pop|drop) [0-9a-f]{7,}/, 'the advice uses a form git accepts');
+  execFileSync('/bin/sh', ['-c', advice], { cwd: repo, stdio: 'pipe' });
+
+  assert.equal(sh(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', 'back where they started');
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /MY LOCAL EDIT/,
+    'and holding the work they had before phantom ran');
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8'), /a\.value/,
+    "phantom's unverified patch did not follow them onto main");
+  assert.equal(sh(repo, ['rev-parse', 'main']), mainSha, 'main never moved');
 });

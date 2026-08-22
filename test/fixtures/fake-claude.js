@@ -163,6 +163,20 @@ function main() {
       writeReport(reportPath, 'Fixed; the branch you started on no longer exists.');
       git('branch', '-D', 'main');
       return output();
+    case 'rival-stash':
+      // Somebody else pushes a stash while phantom is working: the user in
+      // another shell, a `git pull --autostash`, a second phantom run. The
+      // snapshot phantom took is no longer stash@{0}, so an unqualified
+      // `git stash pop` would restore THIS content over the user's tree and
+      // report success.
+      fs.writeFileSync(mathFile, good);
+      writeReport(reportPath, 'Fixed; another stash landed on the stack meanwhile.');
+      fs.writeFileSync(path.join(process.cwd(), 'rival.txt'), 'UNRELATED SCRATCH FROM ANOTHER SHELL\n');
+      // Pathspec-limited so the rival stash captures only its own file and
+      // leaves this session's fix in the tree, the way a genuinely unrelated
+      // `git stash push -- some/file` in another shell would.
+      git('stash', 'push', '-u', '-m', 'someone-elses-work', '--', 'rival.txt');
+      return output();
     case 'drop-stash':
       // The snapshot stash phantom took of the dirty tree is gone.
       fs.writeFileSync(mathFile, good);

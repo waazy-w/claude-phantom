@@ -68,9 +68,21 @@ const DANGEROUS = [
   [new RegExp(B + '(?:export|set|declare)\\s*(?:$|[;&|>])'), 'environment dump'],
 ];
 
+/**
+ * Deny the tool call, and make sure the user is told why.
+ *
+ * The exit code is what blocks; the reason is what makes the block
+ * intelligible, both to Claude Code and to the permission_denials phantom logs
+ * afterwards. Writes to a pipe complete asynchronously on Windows, so exiting
+ * straight after the write dropped the reason and delivered a bare refusal --
+ * on the win32 guard path specifically, which nothing exercises end to end.
+ * Wait for the bytes, then let the process exit on its own.
+ */
 function fail(reason) {
-  process.stderr.write('phantom guard: ' + reason + '\n');
-  process.exit(2);
+  return new Promise((resolve) => {
+    process.exitCode = 2;
+    process.stderr.write('phantom guard: ' + reason + '\n', () => resolve());
+  });
 }
 
 function readStdin() {
@@ -291,7 +303,7 @@ async function main() {
     guard = JSON.parse(fromFile || process.env.PHANTOM_GUARD || '');
     if (!guard || typeof guard !== 'object') throw new Error('not an object');
   } catch {
-    return fail('guard config is missing or malformed (argv file or PHANTOM_GUARD)');
+    return await fail('guard config is missing or malformed (argv file or PHANTOM_GUARD)');
   }
   guard.cwd = path.resolve(guard.cwd || event.cwd || process.cwd());
   guard.neverTouch = Array.isArray(guard.neverTouch) ? guard.neverTouch : [];
@@ -302,7 +314,7 @@ async function main() {
   if (FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)) reason = checkFile(tool, input, guard, isNeverTouch);
   else if (tool === 'Bash') reason = checkBash(input, guard, isNeverTouch);
   if (reason) return fail(reason);
-  process.exit(0);
+  process.exitCode = 0;
 }
 
 if (require.main === module) {

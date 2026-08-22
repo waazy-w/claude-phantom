@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { summarizeExit } = require('./crash');
+const { commandLineOf } = require('./context');
 
 const VERIFICATION_MARKER = '<!-- phantom:verification -->';
 const TEMPLATE_PATH = path.join(__dirname, '..', 'templates', 'post-mortem.md');
@@ -132,7 +133,7 @@ function sumTokens(usage) {
 }
 
 const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : 'unknown');
-const describeCommand = (ctx) => [ctx.command, ...(ctx.args || [])].join(' ');
+const describeCommand = (ctx) => commandLineOf(ctx);
 const code = (s) => '`' + String(s).replace(/`/g, '‵') + '`';
 
 /**

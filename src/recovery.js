@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const git = require('./git');
+const { commandLineOf } = require('./context');
 const { ensureExcluded } = git;
 const ui = require('./ui');
 const notify = require('./notify');
@@ -193,6 +194,33 @@ function waitForExit(child, ms) {
   });
 }
 
+const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : '');
+
+/**
+ * The exact command that restores THIS stash, for a human to run.
+ *
+ * `apply`, not `pop`, and by sha. A bare `git stash pop` is only correct while
+ * phantom's entry is still on top of the stack, which phantom cannot know --
+ * the user's other shell, a `git pull --autostash`, or a second phantom run all
+ * push entries of their own, and popping the wrong one overwrites the tree with
+ * someone else's work. `git stash pop <sha>` is not the fix either: pop and
+ * drop take only a `stash@{n}` reference and reject a raw commit
+ * ("is not a stash reference"), so printing one would hand the user a command
+ * that cannot run. `git stash apply <sha>` does accept the commit, is stable
+ * however the stack moves, and leaves the entry in place until the user is
+ * satisfied -- which is the safer default for someone recovering work anyway.
+ */
+const popHint = (s) => (s.stashRef ? 'git stash apply ' + shortSha(s.stashRef) : 'git stash pop');
+
+/**
+ * `stash@{n}` for `ref` right now, for the one message that has to name a
+ * droppable reference. Recomputed at print time because n moves.
+ */
+const dropHint = (ref, opts) => {
+  const i = git.stashIndexOf(ref, opts);
+  return i === -1 ? 'git stash drop' : "git stash drop 'stash@{" + i + "}'";
+};
+
 function describeStatus(status) {
   return {
     fixed: colors.green('✅ fixed'), unfixed: colors.yellow('❌ unfixed'), 'dry-run': colors.cyan('🔍 dry run'),
@@ -218,10 +246,29 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const s = {
     root: null, origRef: null, branch: null, baseSha: null, onPhantomBranch: false, stashed: false, child: null,
     reportPath: null, aborted: false, cleanupPromise: null, signalHandlers: [], stayed: false, done: false, sessionId: null,
+    // The stash is tracked by commit sha and label, never by stack position:
+    // `git stash pop` with no argument pops whatever landed on top, which may
+    // belong to another shell or another phantom run. See git.stashPush.
+    stashRef: null, stashLabel: null,
   };
   let iterations = 0;
   let testsPassed = null;
   const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message, sessionId: s.sessionId || null });
+
+  /**
+   * Give up *after* the stash was taken.
+   *
+   * `return result(...)` returns straight out of the try block without running
+   * cleanup(), so every failure between the stash and step 9 used to orphan the
+   * user's entire working tree -- stashed, unmentioned, and with the final
+   * message naming an unrelated cause. Anything that bails past the stash point
+   * has to come through here.
+   */
+  const bail = async (status, message) => {
+    log.error(message);
+    await cleanup('could not continue');
+    return result(status, message);
+  };
 
   const removeSignalHandlers = () => {
     for (const [sig, h] of s.signalHandlers) process.removeListener(sig, h);
@@ -246,16 +293,38 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         log.warn('recovery ' + reason + ' after it finished; nothing to undo');
         return;
       }
+      // Every step below reports whether it actually worked. The old code
+      // discarded these booleans and then printed "working tree restored"
+      // unconditionally -- so a reset blocked by a stale index.lock, or a
+      // checkout refused because the branch is open in another worktree, was
+      // announced as a successful restore while the user sat on the phantom
+      // branch with a live stash and a half-written edit on disk.
+      const failed = [];
       if (s.onPhantomBranch && s.baseSha) {
-        git.resetHard(s.baseSha, opts);
-        git.cleanUntracked(opts);
+        if (!git.resetHard(s.baseSha, opts)) failed.push('discard the session\'s changes');
+        if (!git.cleanUntracked(opts)) failed.push('remove the files it created');
       }
-      if (s.onPhantomBranch && s.origRef && git.checkout(s.origRef, opts)) {
-        s.onPhantomBranch = false;
-        if (s.branch && git.headSha(opts) === s.baseSha) { git.deleteBranch(s.branch, opts); s.branch = null; }
+      if (s.onPhantomBranch && s.origRef) {
+        if (git.checkout(s.origRef, opts)) {
+          s.onPhantomBranch = false;
+          if (s.branch && git.headSha(opts) === s.baseSha) { git.deleteBranch(s.branch, opts); s.branch = null; }
+        } else {
+          failed.push('return you to ' + s.origRef);
+        }
       }
-      if (s.stashed && !s.onPhantomBranch && git.stashPop(opts)) s.stashed = false;
-      log.warn('recovery ' + reason + ': working tree restored' + (s.stashed ? ' (run `git stash pop` to get your changes back)' : ''));
+      if (s.stashed && !s.onPhantomBranch) {
+        const pop = git.stashPop(s.stashRef, opts);
+        if (pop.ok) s.stashed = false;
+        else if (pop.conflicted) failed.push('restore your stash cleanly (it conflicted; resolve the markers, then `' + dropHint(s.stashRef, opts) + '`)');
+        else failed.push('restore your stash (' + popHint(s) + ')');
+      }
+      if (!failed.length) {
+        log.warn('recovery ' + reason + ': working tree restored');
+      } else {
+        log.error('recovery ' + reason + ', but phantom could not ' + failed.join('; could not '));
+        if (s.onPhantomBranch && s.branch) log.error('you are still on ' + s.branch);
+        if (s.stashed) log.error('your uncommitted work is safe in the stash: ' + popHint(s));
+      }
     })();
     return s.cleanupPromise;
   };
@@ -263,12 +332,17 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const abort = async (signal) => {
     s.aborted = true;
     await cleanup('interrupted by ' + signal);
-    exit(signal === 'SIGINT' ? 130 : 143);
+    exit(signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143);
   };
   const checkAborted = () => { if (s.aborted) throw new AbortedError(); };
 
   const installSignalHandlers = () => {
-    for (const sig of ['SIGINT', 'SIGTERM']) {
+    // SIGHUP belongs here as much as the other two: closing a terminal tab or
+    // dropping an SSH session sends it, and without a handler phantom died
+    // silently mid-recovery, leaving the user on the phantom branch with a live
+    // stash, no message, and an orphaned claude process. watcher.js has always
+    // forwarded all three.
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       const h = () => { abort(sig); };
       process.on(sig, h);
       s.signalHandlers.push([sig, h]);
@@ -300,10 +374,13 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         return result('refused', 'working tree has uncommitted changes; commit/stash them or re-run with --allow-dirty');
       } else {
         const label = 'phantom-snapshot-' + timestamp();
-        if (!git.stashPush(label, opts)) return result('error', 'could not stash the dirty tree');
+        const ref = git.stashPush(label, opts);
+        if (!ref) return result('error', 'could not stash the dirty tree');
         s.stashed = true;
-        restoreHint = 'git stash pop';
-        log.warn('stashed your uncommitted changes as "' + label + '"; restore with: git stash pop');
+        s.stashRef = ref;
+        s.stashLabel = label;
+        restoreHint = popHint(s);
+        log.warn('stashed your uncommitted changes as "' + label + '"; restore with: ' + popHint(s));
       }
     }
 
@@ -321,10 +398,10 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     // 3. Branch
     s.baseSha = git.headSha(opts);
-    if (!s.baseSha) return result('refused', 'repository has no commits yet');
+    if (!s.baseSha) return await bail('refused', 'repository has no commits yet');
     if (!dryRun) {
       const name = 'phantom/fix-' + ctx.slug + '-' + Date.now().toString(36).slice(-5);
-      if (!git.createBranch(name, opts)) return result('error', 'could not create branch ' + name);
+      if (!git.createBranch(name, opts)) return await bail('error', 'could not create branch ' + name);
       s.branch = name;
       s.onPhantomBranch = true;
       log.info('working on branch ' + colors.bold(name) + ' (your branch ' + s.origRef + ' is untouched)');
@@ -385,7 +462,18 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       cached += report.cachedTokens(res.json.usage);
       if (res.timedOut) { timedOut = true; log.warn('claude session hit the ' + config.maxMinutes + ' minute cap'); break; }
       if (res.json.session_id) { sessionId = res.json.session_id; s.sessionId = sessionId; log.verbose('claude session ' + sessionId); }
-      if (res.json.is_error) log.warn('claude ended with an error: ' + String(res.json.result || res.json.subtype || '').split('\n')[0].slice(0, 200));
+      // .trim() before taking the first line. When claude fails before emitting
+      // any JSON -- overwhelmingly the commonest first run, because the user has
+      // not logged in yet -- finish() builds `result` as '' + '\n' + stderr, so
+      // line 0 is the empty string. The user got "claude ended with an error:"
+      // with nothing after it, phantom ran the test suite anyway, and then
+      // blamed the session for making no changes. The one string that would
+      // have told them what to do ("Invalid API key · Please run /login") was
+      // sitting in line 1.
+      if (res.json.is_error) {
+        const why = String(res.json.result || res.json.subtype || '').trim().split('\n')[0].slice(0, 200);
+        log.warn('claude ended with an error' + (why ? ': ' + why : ' and said nothing on stdout or stderr'));
+      }
       log.verbose('claude turns=' + res.json.num_turns + ' tokens=' + report.sumTokens(res.json.usage) + ' subtype=' + res.json.subtype);
       const denials = Array.isArray(res.json.permission_denials) ? res.json.permission_denials : [];
       if (denials.length) {
@@ -407,7 +495,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       if (t.passed) {
         log.info(colors.green('tests pass'));
         if (config.verifyCommand !== false && !dryRun) {
-          const cmd = [ctx.command, ...(ctx.args || [])].join(' ');
+          const cmd = commandLineOf(ctx);
           log.info('re-running the crashed command: ' + cmd + ' (up to ' + Math.round(reproTimeoutMs / 1000) + 's)…');
           repro = reproduce(ctx, { cwd: s.root, env: baseEnv, timeoutMs: reproTimeoutMs });
           if (repro.fixed) {
@@ -481,7 +569,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       unfixed: !changedFiles.length
         ? 'the session made no changes; nothing was fixed'
         : repro && !repro.fixed
-          ? 'tests pass but ' + [ctx.command, ...(ctx.args || [])].join(' ') + ' still exits ' + repro.code
+          ? 'tests pass but ' + commandLineOf(ctx) + ' still exits ' + repro.code
           : testsPassed === null ? 'patch could not be verified (no test run)' : 'tests still failing after ' + iterations + ' attempt(s)',
       'dry-run': 'diagnosis and proposed patch written to the report; nothing changed',
       timeout: 'recovery exceeded ' + config.maxMinutes + ' minute(s)',
@@ -499,14 +587,14 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     md = report.renderTemplate(md, {
       iterations, duration: report.formatDuration(durationMs), modelUsage, status: report.statusBadge(status), session: report.sessionCell(sessionId),
       branch: reportBranch || '(none)', baseSha: s.baseSha.slice(0, 10), baseBranch: ctx.git.branch, reportPath: s.reportPath,
-      command: [ctx.command, ...ctx.args].join(' '), exitSummary: summarizeExit(ctx), generatedAt: new Date().toISOString(),
+      command: commandLineOf(ctx), exitSummary: summarizeExit(ctx), generatedAt: new Date().toISOString(),
     });
     const claimsFixed = /\*\*Status:\*\*\s*✅/.test(md);
     if ((claimsFixed && status !== 'fixed') || status === 'error' || status === 'timeout') {
       md = md.replace(/\*\*Status:\*\*[^\n]*/, '**Status:** ' + report.statusBadge(status) + ' (set by phantom: ' + message + ')');
     }
     md = report.appendVerification(md, {
-      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId, repro, command: [ctx.command, ...(ctx.args || [])].join(' '),
+      status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId, repro, command: commandLineOf(ctx),
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
     });
     fs.writeFileSync(s.reportPath, md);
@@ -518,7 +606,16 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         const why = config.autoCommit === false ? '--no-commit'
           : violations.length ? 'never-touch violation, nothing was committed'
           : 'commit failed';
-        log.warn('leaving you on ' + s.branch + ' with uncommitted changes (' + why + '); go back with: git stash && git checkout ' + s.origRef);
+        log.warn('leaving you on ' + s.branch + ' with uncommitted changes (' + why + ')');
+        // With a stash outstanding the old one-liner was actively destructive:
+        // `git stash && git checkout <ref>` pushes phantom's work onto the stack,
+        // so the `git stash pop` the user reaches for next restores THAT instead
+        // of their own snapshot -- landing phantom's unverified patch on the
+        // branch phantom just promised was untouched, and burying the real work
+        // one level deeper. Popping by sha is what makes the sequence safe.
+        log.warn(s.stashed
+          ? 'go back with: git stash && git checkout ' + s.origRef + ' && ' + popHint(s)
+          : 'go back with: git stash && git checkout ' + s.origRef);
       } else if (git.checkout(s.origRef, opts)) {
         s.onPhantomBranch = false;
         if (!changedFiles.length && !committed) {
@@ -531,8 +628,26 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       }
     }
     if (s.stashed && !s.onPhantomBranch) {
-      if (git.stashPop(opts)) { s.stashed = false; restoreHint = null; }
-      else log.warn('could not pop the stash automatically; run: git stash pop');
+      const pop = git.stashPop(s.stashRef, opts);
+      if (pop.ok) { s.stashed = false; restoreHint = null; }
+      else if (pop.conflicted) {
+        // git has already written the merge into the tree and kept the entry on
+        // the stack. Telling the user to "run git stash pop" here hands them a
+        // command that cannot succeed, on a tree that is now carrying conflict
+        // markers they were never told about.
+        restoreHint = null;
+        log.error('your stash conflicted with the restored tree; the working tree now has conflict markers');
+        log.error('resolve them, then drop the stash with: ' + dropHint(s.stashRef, opts));
+      } else {
+        restoreHint = popHint(s);
+        // `missing` means the entry left the stack while the session ran -- the
+        // fake `drop-stash` case, another shell, a `git stash clear`. The commit
+        // itself usually survives until gc, and `git stash apply <sha>` still
+        // reaches it, which is the whole reason the sha is what gets recorded.
+        log.warn(pop.missing
+          ? 'your snapshot stash was dropped while phantom was working; the commit usually survives, so try: ' + popHint(s)
+          : 'could not pop the stash automatically; run: ' + popHint(s));
+      }
     }
     s.done = true;
     removeSignalHandlers();
