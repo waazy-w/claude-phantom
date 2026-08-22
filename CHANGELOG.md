@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-22
+
+Continues the audit that produced 0.3.6, taking the two findings that were held back
+because they change behaviour rather than only fixing it.
+
+### Fixed
+
+- **Concurrent crashes destroyed the event log.** `appendEvent` read the whole file,
+  concatenated, and wrote it back with no lock, so two phantom-wrapped commands crashing
+  at once — a monorepo, `npm-run-all -p`, a CI matrix, two terminals — had each writer
+  read a snapshot the other was mid-truncate on and write that shorter version back as
+  the authoritative log. Measured at 6 writers × 10 events against a full log: 38, then
+  22, then 54 of the 60 new events gone. Not torn lines; the file simply shrank. Writes
+  are now a bare `O_APPEND`, which is atomic against other appenders.
+- **Readers could catch the log and the cursor mid-write.** Rewriting in place left a
+  window where a concurrent reader saw an empty or truncated file — ~1% of reads under
+  load, and `phantom-status` runs on every status-line render. An empty cursor is worse
+  than an empty log: it replays everything as unread. Both are now written to a sibling
+  and renamed, which is atomic. The plugin's copy of `markRead` got the same treatment.
+- **One crash could inject 200 KB into every Claude Code prompt.** `error` is a line of
+  the crashed program's own output and nothing bounded it, so a minified bundle or a
+  single-line JSON blob went verbatim into the log and from there into
+  `additionalContext` on every prompt in that repo — about 50k tokens of the user's
+  context window per event. `error`, `command` and `message` are now clamped, with the
+  truncation visible rather than silent.
+- **`--dry-run` did not restrict Bash, and never checked what happened.** The file tools
+  refused every write under `--dry-run` from the start, but `checkBash` had no dry-run
+  branch at all, so `echo patched > src/app.js`, `sed -i` and `tee` all went through. Dry
+  run is the worst place for that gap: it creates no branch, so the writes landed on the
+  user's own checked-out branch with nothing to roll them back — while the banner said
+  "nothing changed", the report said "Files changed | none", and the never-touch row
+  claimed a hard revert that had never happened. Now: Bash writes are refused, the tree
+  is measured in dry run too, and anything that still got through is named, undone
+  file-by-file, and reported as an `error` rather than a clean dry run.
+- **A failed never-touch revert was still announced as a discard.** `resetHard` and
+  `cleanUntracked` return values were dropped, so a stale `index.lock` was enough to make
+  phantom's strongest safety claim false while the edits stayed on disk.
+- The post-mortem's never-touch row no longer hardcodes "(branch hard-reverted)"; it
+  states what actually happened, which in a dry run is that there was no branch at all.
+
+### Changed
+
+- **`MAX_EVENTS` is a ceiling, not an exact length.** The whole-file rewrite that enforces
+  it now runs only once the log crosses 1.5× the cap, and under a lock, so the common path
+  stays a lock-free atomic append. Between trims the log may hold up to 300 lines.
+- The dry-run undo is deliberately surgical — `git checkout HEAD -- <paths>` for tracked
+  files, `unlink` for files the session created. `reset --hard` would be catastrophic
+  here: dry run takes no stash, so the user's own uncommitted work shares the tree.
+
 ## [0.3.6] - 2026-08-22
 
 Found by an audit that ran the code in places the suite never had: behind a pipe, in a
@@ -326,7 +375,8 @@ has a regression test, and every test was mutation-checked against the 0.3.5 beh
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/waazy-w/claude-phantom/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/waazy-w/claude-phantom/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/waazy-w/claude-phantom/compare/v0.3.3...v0.3.4

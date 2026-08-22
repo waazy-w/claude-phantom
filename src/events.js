@@ -33,13 +33,73 @@ const { commandLineOf } = require('./context');
 
 const EVENTS_REL = path.join('.phantom', 'events.jsonl');
 const CURSOR_REL = path.join('.phantom', 'events.cursor');
+const LOCK_REL = path.join('.phantom', 'events.lock');
 const MAX_EVENTS = 200;
+/**
+ * Trim only once the log is half again over the cap. Trimming is the one
+ * operation that rewrites the whole file, so it is worth making rare: between
+ * trims every write is a bare append, which is where the concurrency safety
+ * comes from.
+ */
+const TRIM_AT = Math.floor(MAX_EVENTS * 1.5);
 const STALE_MS = 24 * 60 * 60 * 1000;
+/**
+ * Per-field caps, in characters.
+ *
+ * `error` is one line of the crashed program's own output, and nothing bounded
+ * it: a minified bundle or a JSON blob on one line went verbatim into the log
+ * and from there straight into `additionalContext` on every Claude Code prompt
+ * in that repo. One 200 KB line measured 200,142 bytes of events.jsonl and
+ * ~50k tokens burned out of the user's context window per event. Long enough to
+ * identify the crash is all this needs to be.
+ */
+const MAX_ERROR_CHARS = 500;
+const MAX_COMMAND_CHARS = 300;
+const MAX_MESSAGE_CHARS = 500;
+/** A lock older than this is assumed to belong to a process that died. */
+const LOCK_STALE_MS = 10 * 1000;
 
 let counter = 0;
 
 function eventsPath(root) { return path.join(root, EVENTS_REL); }
 function cursorPath(root) { return path.join(root, CURSOR_REL); }
+function lockPath(root) { return path.join(root, LOCK_REL); }
+
+/** One line, bounded, with the truncation visible rather than silent. */
+function clamp(value, max) {
+  if (typeof value !== 'string') return value;
+  const oneLine = value.replace(/\s*[\r\n]+\s*/g, ' ');
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
+}
+
+/**
+ * Exclusive lock via O_EXCL create -- atomic on POSIX and Windows alike, and
+ * the only mutual exclusion available without a dependency. Returns a release
+ * function, or null when the lock is held.
+ */
+function acquireLock(root) {
+  const file = lockPath(root);
+  try {
+    const fd = fs.openSync(file, 'wx');
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch {
+    // Held. If the holder died mid-trim the lock would block trimming forever,
+    // so break it once it is clearly stale. Worst case two trims overlap, and
+    // both write a complete file via rename, so the log stays valid either way.
+    try {
+      const age = Date.now() - fs.statSync(file).mtimeMs;
+      if (age < LOCK_STALE_MS) return null;
+      fs.unlinkSync(file);
+      const fd = fs.openSync(file, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+    } catch {
+      return null;
+    }
+  }
+  return () => { try { fs.unlinkSync(file); } catch { /* already gone */ } };
+}
 
 function newId(now = Date.now()) {
   counter = (counter + 1) % 0xffff;
@@ -56,19 +116,61 @@ function newId(now = Date.now()) {
 function appendEvent(root, event, opts = {}) {
   const now = opts.now === undefined ? Date.now() : opts.now;
   const full = Object.assign({ v: 1, id: newId(now), at: new Date(now).toISOString(), error: null, exit: null, signal: null }, event);
+  full.error = clamp(full.error, MAX_ERROR_CHARS);
+  full.command = clamp(full.command, MAX_COMMAND_CHARS);
+  if (full.message !== undefined) full.message = clamp(full.message, MAX_MESSAGE_CHARS);
   try {
     fs.mkdirSync(path.dirname(eventsPath(root)), { recursive: true });
-    const existing = readLines(root);
-    const lines = existing.concat(JSON.stringify(full));
-    const kept = lines.length > MAX_EVENTS ? lines.slice(lines.length - MAX_EVENTS) : lines;
-    if (kept.length === lines.length && existing.length) {
-      fs.appendFileSync(eventsPath(root), JSON.stringify(full) + '\n');
-    } else {
-      fs.writeFileSync(eventsPath(root), kept.join('\n') + '\n');
-    }
+    // Append, always. This used to be read-all -> concat -> writeFileSync the
+    // whole file, with no lock: two phantom-wrapped commands crashing at once
+    // (a monorepo, `npm-run-all -p`, a CI matrix, two terminals) had each writer
+    // read a snapshot the other was mid-truncate on and write it back as the
+    // authoritative log. Measured: 6 writers x 10 events against a 200-line log
+    // left 22, then 38, then 6 lines, losing 38, 22 and 54 of the 60 new events.
+    // Not torn lines -- the file simply shrank.
+    //
+    // A lone O_APPEND write is atomic against other appenders, so nothing is
+    // lost and nothing interleaves. The cap is enforced separately, below.
+    fs.appendFileSync(eventsPath(root), JSON.stringify(full) + '\n');
+    trimIfNeeded(root);
     return full;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Enforce MAX_EVENTS without ever exposing a partial file.
+ *
+ * Rewriting in place is what made concurrent readers see an empty or truncated
+ * log (~1% of reads under load, and `phantom-status` runs on every status-line
+ * render). Writing a sibling and renaming is atomic, so a reader sees either
+ * the old file or the new one. The lock keeps two trimmers from fighting; if it
+ * cannot be had, the trim is simply skipped -- the log grows a little and the
+ * next writer tries again, which is strictly better than corrupting it.
+ */
+function trimIfNeeded(root) {
+  let lines;
+  try {
+    lines = readLines(root);
+  } catch {
+    return;
+  }
+  if (lines.length <= TRIM_AT) return;
+  const release = acquireLock(root);
+  if (!release) return;
+  try {
+    // Re-read under the lock: another writer may have appended since the check.
+    const current = readLines(root);
+    if (current.length <= MAX_EVENTS) return;
+    const kept = current.slice(current.length - MAX_EVENTS);
+    const tmp = eventsPath(root) + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, kept.join('\n') + '\n');
+    fs.renameSync(tmp, eventsPath(root));
+  } catch {
+    /* best-effort: a failed trim leaves a valid, slightly long log */
+  } finally {
+    release();
   }
 }
 
@@ -132,7 +234,11 @@ function markRead(root) {
   if (!events.length) return false;
   try {
     fs.mkdirSync(path.dirname(cursorPath(root)), { recursive: true });
-    fs.writeFileSync(cursorPath(root), events[events.length - 1].id + '\n');
+    // Same rename dance as the log: a reader must never catch this file empty
+    // between truncate and write, because an empty cursor replays everything.
+    const tmp = cursorPath(root) + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, events[events.length - 1].id + '\n');
+    fs.renameSync(tmp, cursorPath(root));
     return true;
   } catch {
     return false;
@@ -222,6 +328,7 @@ function describeEvent(ev, now = Date.now()) {
 }
 
 module.exports = {
+  MAX_ERROR_CHARS, MAX_COMMAND_CHARS, TRIM_AT,
   EVENTS_REL, CURSOR_REL, MAX_EVENTS, STALE_MS,
   eventsPath, cursorPath, appendEvent, readEvents, readUnread, markRead, findRoot,
   crashEvent, recoveryEvent, describeEvent, timeAgo,

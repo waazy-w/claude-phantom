@@ -259,6 +259,39 @@ function checkFile(tool, input, guard, isNeverTouch) {
   return null;
 }
 
+/**
+ * Shapes that write, for the dry-run check.
+ *
+ * `--dry-run` promises the tree is not touched, and the file tools honoured it
+ * (`checkFile` refuses every WRITE_TOOL) -- but Bash had no dry-run branch at
+ * all, so `echo patched > src/app.js`, `sed -i`, and `tee` all sailed through.
+ * That is worse in dry run than anywhere else: no branch is created, so the
+ * writes land on the user's own checked-out branch with nothing to revert them,
+ * while the banner says "nothing changed".
+ *
+ * Prevention beats detection here, so this errs toward refusing: a false
+ * positive costs the session one tool call it can route through Read/Grep.
+ */
+const DRY_RUN_WRITERS = [
+  // A redirect that targets a file. `2>&1` and `>&2` duplicate a descriptor
+  // rather than writing, so they are deliberately not matched.
+  [/(?:^|[^0-9&>])>>?\s*(?![&|])\S/, 'output redirection'],
+  [/(?:^|[|;&\s])tee\b/, 'tee'],
+  [/(?:^|[|;&\s])sed\s+(?:[^|;&]*\s)?-[a-zA-Z]*i/, 'sed -i'],
+  // Specific before generic, so the reason names the actual command.
+  [/(?:^|[|;&\s])git\s+(?:apply|add|commit|checkout|restore|stash|clean|mv|rm|revert|merge|rebase|reset)\b/, 'a git command that writes'],
+  [/(?:^|[|;&\s])(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|remove|uninstall|link|ci)\b/, 'a package install'],
+  [/(?:^|[|;&\s])(?:pip|pip3)\s+(?:install|uninstall)\b/, 'a package install'],
+  [/(?:^|[|;&\s])(?:chmod|chown)\b/, 'a permission change'],
+  [/(?:^|[|;&\s])mkdir\b/, 'mkdir'],
+  [/(?:^|[|;&\s])(?:rm|rmdir|mv|cp|touch|truncate|dd|ln|install|patch|shred)\b/, 'a file-mutating command'],
+];
+
+function dryRunWriteReason(command) {
+  for (const [re, why] of DRY_RUN_WRITERS) if (re.test(command)) return why;
+  return null;
+}
+
 function checkBash(input, guard, isNeverTouch) {
   const command = String(input.command || '');
   // Match against the raw string and a quote-stripped one so `git 'push'`,
@@ -266,6 +299,10 @@ function checkBash(input, guard, isNeverTouch) {
   const variants = [command, command.replace(/["'`\\]/g, '')];
   for (const [re, why] of DANGEROUS) {
     if (variants.some((v) => re.test(v))) return why + ': ' + command.slice(0, 120);
+  }
+  if (guard.dryRun) {
+    const why = dryRunWriteReason(command);
+    if (why) return 'dry run: no writes (' + why + '): ' + command.slice(0, 120);
   }
   const pathGlobs = (guard.neverTouch || []).filter((g) => g !== 'node_modules/**');
   for (const tok of tokenizeCommand(command)) {
@@ -321,4 +358,4 @@ if (require.main === module) {
   main().catch((err) => fail('internal error: ' + (err && err.message)));
 }
 
-module.exports = { DANGEROUS, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob };
+module.exports = { DANGEROUS, DRY_RUN_WRITERS, dryRunWriteReason, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob };

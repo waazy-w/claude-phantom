@@ -900,3 +900,61 @@ test("phantom's own instructions, run verbatim, give the user their work back", 
     "phantom's unverified patch did not follow them onto main");
   assert.equal(sh(repo, ['rev-parse', 'main']), mainSha, 'main never moved');
 });
+
+test('a dry run that writes anyway is reported and undone, not called "nothing changed"', async () => {
+  // --dry-run had no Bash restriction and never measured the tree, so a session
+  // that wrote files left them on the user's OWN branch -- there is no phantom
+  // branch in dry run -- while the banner said "nothing changed", the report
+  // said "Files changed | none", and the never-touch row claimed a hard revert
+  // that never happened.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const ctx = makeCtx(repo, config);
+  const baseSha = sh(repo, ['rev-parse', 'HEAD']);
+  const originalMath = fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8');
+
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, { dryRun: true }, { env: scenarioEnv('dryrun-writes'), exit: () => {} }));
+
+  assert.match(out, /dry run was supposed to change nothing, but the session wrote:.*math\.js/,
+    'phantom says what happened');
+  assert.equal(res.status, 'error', 'and does not call it a clean dry run');
+
+  // Undone precisely: the tracked edit restored, the created file removed.
+  assert.equal(fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8'), originalMath);
+  assert.ok(!fs.existsSync(path.join(repo, 'sneaky.txt')));
+  assert.equal(sh(repo, ['rev-parse', 'HEAD']), baseSha, 'no commit, no branch');
+  assert.equal(sh(repo, ['branch', '--list', 'phantom/*']), '', 'a dry run still creates no branch');
+  assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
+});
+
+test('a dry run never destroys work the user already had in the tree', async () => {
+  // The undo has to be surgical. `reset --hard` would be catastrophic here:
+  // dry run takes no stash (it "reads the tree as-is"), so the user's own
+  // uncommitted edits are sitting in the same working tree as the session's.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  fs.appendFileSync(path.join(repo, 'src', 'app.js'), '// MY OWN WORK\n');
+  fs.writeFileSync(path.join(repo, 'my-notes.txt'), 'mine, untracked\n');
+  const ctx = makeCtx(repo, config);
+
+  await withOutput(() => runRecovery(ctx, config, { dryRun: true }, { env: scenarioEnv('dryrun-writes'), exit: () => {} }));
+
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'app.js'), 'utf8'), /MY OWN WORK/,
+    "the user's tracked edit is untouched");
+  assert.ok(fs.existsSync(path.join(repo, 'my-notes.txt')), "and their untracked file still exists");
+  // While the session's writes are still undone.
+  assert.ok(!fs.existsSync(path.join(repo, 'sneaky.txt')));
+  assert.match(fs.readFileSync(path.join(repo, 'src', 'math.js'), 'utf8'), /a\.value/, 'session edit reverted');
+});
+
+test('a clean dry run is still reported as a clean dry run', async () => {
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const ctx = makeCtx(repo, config);
+  const { result: res, out } = await withOutput(() =>
+    runRecovery(ctx, config, { dryRun: true }, { env: scenarioEnv('dryrun'), exit: () => {} }));
+  assert.equal(res.status, 'dry-run');
+  assert.doesNotMatch(out, /supposed to change nothing/);
+  assert.equal(sh(repo, ['status', '--porcelain']), '', 'and the tree really is clean');
+});

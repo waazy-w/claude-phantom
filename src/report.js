@@ -234,7 +234,13 @@ function appendVerification(markdown, info) {
     : '⏭ no test command configured';
   const files = info.changedFiles && info.changedFiles.length ? info.changedFiles.map(code).join(', ') : 'none';
   const violations = info.neverTouchViolations || [];
-  const audit = violations.length ? '❌ violated — ' + violations.map(code).join(', ') + ' (branch hard-reverted)' : '✅ clean';
+  // What happened to the violating files is passed in, not assumed. This row
+  // used to state "(branch hard-reverted)" unconditionally -- printed verbatim
+  // in a dry run, which creates no branch and reverted nothing, and printed
+  // again when the reset itself failed and the edits were still on disk.
+  const audit = violations.length
+    ? '❌ violated — ' + violations.map(code).join(', ') + ' (' + (info.violationOutcome || 'branch hard-reverted') + ')'
+    : '✅ clean';
   const repro = info.repro;
   const reproCell = !repro
     ? '⏭ not re-run'

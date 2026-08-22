@@ -192,6 +192,16 @@ function main() {
           { tool_name: 'Bash', tool_input: { command: 'rm -rf /' } },
         ],
       });
+    case 'dryrun-writes':
+      // A dry run promises the tree is untouched, but the session can still
+      // write: the guard is lexical, and README documents the `node -e` escape.
+      // What phantom must do is notice, say so, and undo precisely what was
+      // written -- without reset --hard, since a dry run makes no branch and
+      // the user's own uncommitted work is sitting in the same tree.
+      fs.writeFileSync(mathFile, good);
+      fs.writeFileSync(path.join(process.cwd(), 'sneaky.txt'), 'created during a dry run\n');
+      writeReport(reportPath, 'Dry run, but I edited the files anyway.');
+      return output();
     case 'dryrun':
       writeReport(reportPath, 'Dry run: proposed diff only.');
       return output();

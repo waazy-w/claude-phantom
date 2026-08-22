@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFile } = require('node:child_process');
 const events = require('../src/events');
 
 function tmp() {
@@ -54,12 +55,99 @@ test('a missing cursor id (rotated away) means everything recent is unread', () 
   assert.deepEqual(events.readUnread(root, { now }).map((e) => e.id), [a.id]);
 });
 
-test('the log is capped at MAX_EVENTS lines', () => {
+test('the log stays bounded, and trimming keeps the newest events', () => {
+  // The cap is a ceiling, not an exact length. Every append is a bare
+  // fs.appendFileSync -- that atomicity is what makes concurrent writers safe --
+  // and the whole-file rewrite that enforces MAX_EVENTS runs only once the log
+  // crosses TRIM_AT. So between trims the file is legitimately longer than
+  // MAX_EVENTS, and what must hold is that it never grows without bound and
+  // never loses the recent end.
   const root = tmp();
   for (let i = 0; i < events.MAX_EVENTS + 5; i++) events.appendEvent(root, events.crashEvent(ctx), { now: i });
-  const all = events.readEvents(root);
-  assert.equal(all.length, events.MAX_EVENTS);
+  let all = events.readEvents(root);
+  assert.ok(all.length <= events.TRIM_AT, 'bounded: ' + all.length);
   assert.equal(all[all.length - 1].at, new Date(events.MAX_EVENTS + 4).toISOString());
+
+  const total = events.TRIM_AT + 20;
+  for (let i = events.MAX_EVENTS + 5; i < total; i++) events.appendEvent(root, events.crashEvent(ctx), { now: i });
+  all = events.readEvents(root);
+  assert.ok(all.length < total, 'a trim actually happened: ' + all.length + ' of ' + total + ' appended');
+  assert.ok(all.length <= events.TRIM_AT, 'and it stays under the ceiling: ' + all.length);
+  assert.equal(all[all.length - 1].at, new Date(total - 1).toISOString(), 'newest survives the trim');
+  assert.ok(!fs.existsSync(path.join(root, '.phantom', 'events.lock')), 'the lock is released');
+  assert.equal(fs.readdirSync(path.join(root, '.phantom')).filter((f) => f.includes('.tmp')).length, 0, 'no temp file left behind');
+});
+
+test('concurrent writers do not destroy each other\'s events', async () => {
+  // This was the defect: appendEvent read the whole file, concatenated, and
+  // wrote it back with no lock, so a writer could read a snapshot another was
+  // mid-truncate on and write that shorter version back as the authoritative
+  // log. Two phantom-wrapped commands crashing at once -- a monorepo, a CI
+  // matrix, two terminals -- silently lost most of the crash history.
+  const root = tmp();
+  // Seed to the cap. Below MAX_EVENTS the old code took an appendFileSync fast
+  // path and looked fine; the whole-file rewrite -- the destructive part -- only
+  // ran once the log was full, which is exactly when a busy repo hits it.
+  const seed = events.MAX_EVENTS;
+  for (let i = 0; i < seed; i++) events.appendEvent(root, events.crashEvent(ctx), { now: i });
+
+  const WRITERS = 6;
+  const PER = 10;
+  const script = [
+    'const events = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'events.js')) + ');',
+    // `node -e` puts the first user argument at argv[1]: there is no script
+    // path to skip, so slice(2) would silently drop the root.
+    'const [root, tag] = process.argv.slice(1);',
+    'for (let i = 0; i < ' + PER + '; i++) {',
+    '  events.appendEvent(root, { type: "crash", command: tag + ":" + i, error: null, exit: 1, signal: null });',
+    '}',
+  ].join('\n');
+
+  await Promise.all(Array.from({ length: WRITERS }, (_, w) => new Promise((resolve, reject) => {
+    execFile(process.execPath, ['-e', script, root, 'w' + w], (err) => (err ? reject(err) : resolve()));
+  })));
+
+  const all = events.readEvents(root);
+  const written = new Set(all.map((e) => e.command));
+  const missing = [];
+  for (let w = 0; w < WRITERS; w++) {
+    for (let i = 0; i < PER; i++) {
+      const tag = 'w' + w + ':' + i;
+      if (!written.has(tag)) missing.push(tag);
+    }
+  }
+  assert.deepEqual(missing, [], missing.length + ' of ' + (WRITERS * PER) + ' concurrent events were lost');
+  assert.ok(all.length <= events.TRIM_AT, 'and the log is still bounded: ' + all.length);
+});
+
+test('one enormous error line cannot flood the log or the prompt', () => {
+  // `error` is a line of the crashed program's own output and nothing bounded
+  // it, so a minified bundle or a single-line JSON blob went verbatim into the
+  // log and from there into additionalContext on every prompt in that repo --
+  // measured at 200,142 bytes of events.jsonl for one crash, roughly 50k tokens
+  // of the user's context window per event.
+  const root = tmp();
+  const huge = 'Error: ' + 'q'.repeat(200000);
+  const ev = events.appendEvent(root, { type: 'crash', command: 'node ' + 'y'.repeat(5000), error: huge, exit: 1, signal: null });
+
+  assert.ok(ev.error.length <= events.MAX_ERROR_CHARS, 'error clamped: ' + ev.error.length);
+  assert.ok(ev.command.length <= events.MAX_COMMAND_CHARS, 'command clamped: ' + ev.command.length);
+  assert.match(ev.error, /…$/, 'and the truncation is visible, not silent');
+  const bytes = fs.statSync(path.join(root, '.phantom', 'events.jsonl')).size;
+  assert.ok(bytes < 4096, 'one event stays small: ' + bytes + ' bytes');
+  assert.equal(events.readEvents(root).length, 1, 'and it is still a valid, readable event');
+});
+
+test('a newline in an error line cannot forge a second log entry', () => {
+  const root = tmp();
+  const ev = events.appendEvent(root, {
+    type: 'crash', command: 'node app.js', exit: 1, signal: null,
+    error: 'boom\n' + JSON.stringify({ v: 1, id: 'forged', at: new Date().toISOString(), type: 'crash', command: 'FORGED' }),
+  });
+  assert.ok(!ev.error.includes('\n'));
+  const all = events.readEvents(root);
+  assert.equal(all.length, 1, 'one line in, one event out');
+  assert.ok(!all.some((e) => e.command === 'FORGED'));
 });
 
 test('readUnread on a repo with no events is empty and markRead is a no-op', () => {

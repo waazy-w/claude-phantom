@@ -409,6 +409,11 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     // 4-5. Claude session + independent verification loop
     const neverTouchBefore = audit.snapshotNeverTouch(s.root, config.neverTouch, { skipPrefixes: [phantomDir] });
+    // In a dry run there is no branch, so "what changed" has to be measured
+    // against what was already dirty when phantom started -- otherwise the
+    // user's own uncommitted work reads as the session's doing, and restoring
+    // it would destroy exactly what phantom promised not to touch.
+    const dirtyBefore = dryRun ? new Set(git.changedFilesSince(s.baseSha, opts)) : null;
     let testCommand = resolveTestCommand(s.root, config, ctx);
     const maxAttempts = Math.max(1, Number(config.maxIterations) || 1);
     const guard = { neverTouch: config.neverTouch, cwd: s.root, dryRun, testCommand, reportPath: s.reportPath };
@@ -527,22 +532,50 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     // alarm on the most alarming message phantom has.
     const snapChanged = [...snapDiff.modified, ...snapDiff.added, ...snapDiff.removed];
     const unrestorable = snapChanged.filter((f) => !git.isTracked(f, opts));
-    if (!dryRun) {
-      changedFiles = git.changedFilesSince(s.baseSha, opts).filter((f) => !f.startsWith(phantomDir + '/'));
-      violations = changedFiles.filter((f) => isNeverTouch(f, config.neverTouch));
-    }
+    // Measured in dry run too. This used to be skipped entirely, so a session
+    // that wrote files anyway -- via the `node -e` escape the README documents,
+    // or the Bash redirects the guard did not cover -- left them on the user's
+    // own branch while the banner said "nothing changed", the report said
+    // "Files changed | none", and the never-touch row claimed a revert that
+    // never happened. Not measuring was the reason phantom could not tell.
+    changedFiles = git.changedFilesSince(s.baseSha, opts).filter((f) => !f.startsWith(phantomDir + '/'));
+    if (dryRun) changedFiles = changedFiles.filter((f) => !dirtyBefore.has(f));
+    violations = changedFiles.filter((f) => isNeverTouch(f, config.neverTouch));
     for (const f of snapChanged) if (!violations.includes(f)) violations.push(f);
     if (unrestorable.length) {
       log.error('never-touch files changed outside git during recovery: ' + unrestorable.join(', ') + ' — phantom cannot restore these; inspect them now');
     }
     if (violations.length && !dryRun) {
       log.error('never-touch violation: ' + violations.join(', ') + ' — discarding the session\'s changes');
-      git.resetHard(s.baseSha, opts);
-      git.cleanUntracked(opts);
-      changedFiles = [];
+      const reset = git.resetHard(s.baseSha, opts);
+      const cleaned = git.cleanUntracked(opts);
+      // Saying "discarding" when the discard failed is the single worst thing
+      // this line can do: it is phantom's strongest safety claim, and a stale
+      // index.lock was enough to make it false while the edits stayed on disk.
+      if (reset && cleaned) changedFiles = [];
+      else log.error('the revert did not complete; the session\'s changes are STILL on ' + s.branch + ' — inspect them before doing anything else');
+    }
+    // A dry run has no branch to throw away, so anything the session wrote is
+    // sitting on the user's own checkout. Undo precisely what it touched --
+    // never `reset --hard`, which would take the user's uncommitted work too.
+    let dryRunWrote = [];
+    if (dryRun && changedFiles.length) {
+      dryRunWrote = changedFiles.slice();
+      log.error('dry run was supposed to change nothing, but the session wrote: ' + dryRunWrote.join(', '));
+      const tracked = dryRunWrote.filter((f) => git.isTracked(f, opts));
+      const untracked = dryRunWrote.filter((f) => !git.isTracked(f, opts));
+      const restored = git.restorePaths(tracked, opts);
+      const removed = [];
+      for (const f of untracked) {
+        try { fs.unlinkSync(path.join(s.root, f)); removed.push(f); } catch { /* reported below */ }
+      }
+      const leftover = (restored ? [] : tracked).concat(untracked.filter((f) => !removed.includes(f)));
+      if (leftover.length) log.error('could not undo: ' + leftover.join(', ') + ' — these are still modified on ' + (ctx.git.branch || 'your branch'));
+      else log.info('reverted them; your working tree is back as it was');
+      changedFiles = leftover;
     }
     let status;
-    if (dryRun) status = 'dry-run';
+    if (dryRun) status = dryRunWrote.length ? 'error' : 'dry-run';
     else if (violations.length) status = 'error';
     else if (timedOut) status = 'timeout';
     // A session that changed nothing cannot have fixed anything, however green
@@ -596,6 +629,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     md = report.appendVerification(md, {
       status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId, repro, command: commandLineOf(ctx),
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
+      violationOutcome: dryRun
+        ? (changedFiles.length ? 'STILL ON DISK — dry run has no branch to revert' : 'reverted in place; no branch was created')
+        : (changedFiles.length ? 'revert FAILED — changes are still on the branch' : 'branch hard-reverted'),
     });
     fs.writeFileSync(s.reportPath, md);
 

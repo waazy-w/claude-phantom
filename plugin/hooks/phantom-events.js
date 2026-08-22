@@ -85,7 +85,12 @@ function markRead(root, events) {
   if (!events.length) return;
   try {
     fs.mkdirSync(path.dirname(cursorPath(root)), { recursive: true });
-    fs.writeFileSync(cursorPath(root), events[events.length - 1].id + '\n');
+    // Write-and-rename, matching src/events.js: truncate-then-write leaves a
+    // window where a concurrent reader sees an empty cursor, and an empty
+    // cursor replays the entire log as unread.
+    const tmp = cursorPath(root) + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, events[events.length - 1].id + '\n');
+    fs.renameSync(tmp, cursorPath(root));
   } catch { /* best-effort */ }
 }
 

@@ -295,3 +295,60 @@ test('a broken never-touch.js does not open the guard: the fallback matcher stil
   assert.equal(run(ev(bash('npm test')), guard, { hook }).code, 0);
   assert.equal(run(ev(file('Edit', 'src/index.js')), guard, { hook }).code, 0);
 });
+
+test('a dry run refuses Bash commands that write, not just the file tools', () => {
+  // checkFile refused every WRITE_TOOL under --dry-run from the start, but
+  // checkBash had no dry-run branch at all, so the mode that promises "nothing
+  // is touched" allowed `echo patched > src/app.js`, `sed -i` and `tee`. It is
+  // the worst place for that gap: dry run creates no branch, so those writes
+  // land on the user's own checkout with nothing to roll them back.
+  const dry = { ...baseGuard, dryRun: true };
+  const bash = (command) => run({ tool_name: 'Bash', tool_input: { command } }, dry);
+
+  // Refused *by the dry-run rule* -- none of these trip any other check, so the
+  // reason names the mode. `rm -rf build` is deliberately not in this list: it
+  // is already refused as a recursive rm, and asserting the dry-run wording on
+  // it would only pin which rule happens to match first.
+  const blockedByDryRun = [
+    'echo patched > src/app.js',
+    'printf x >> notes.txt',
+    'cat patch | tee src/app.js',
+    'sed -i "s/a/b/" src/app.js',
+    'mv a.js b.js',
+    'cp a.js b.js',
+    'touch newfile.js',
+    'mkdir scratch',
+    'chmod +x run.sh',
+  ];
+  for (const command of blockedByDryRun) {
+    const r = bash(command);
+    assert.equal(r.code, 2, 'should be refused in a dry run: ' + command);
+    assert.match(r.stderr, /dry run: no writes/, command);
+  }
+  // Already refused in both modes by rules that predate this one; all that
+  // matters here is that dry run does not somehow let them through.
+  for (const command of ['rm -rf build', 'git apply fix.diff', 'git checkout -- src/app.js', 'npm install lodash']) {
+    assert.equal(bash(command).code, 2, command);
+  }
+
+  // Reading and verifying are the whole point of a dry run, so they must work.
+  const allowed = [
+    'npm test',
+    'node --test test/math.test.js',
+    'cat src/app.js',
+    'grep -rn TODO src',
+    'ls -la src',
+    'git status',
+    'git diff',
+    'node app.js 2>&1',      // descriptor duplication, not a file write
+    'echo problem >&2',
+  ];
+  for (const command of allowed) {
+    assert.equal(bash(command).code, 0, 'should be allowed in a dry run: ' + command);
+  }
+
+  // And none of this changes outside dry run, where patching is the job.
+  for (const command of ['sed -i "s/a/b/" src/app.js', 'echo x > src/app.js', 'mkdir scratch', 'mv a.js b.js', 'touch newfile.js']) {
+    assert.equal(run({ tool_name: 'Bash', tool_input: { command } }).code, 0, 'allowed in a real run: ' + command);
+  }
+});

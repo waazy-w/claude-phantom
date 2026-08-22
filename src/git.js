@@ -131,6 +131,19 @@ const stashPop = (ref, opts) => {
   return { ok: r.ok, conflicted, missing: false, stderr: r.stderr };
 };
 const resetHard = (sha, opts) => run(['reset', '--hard', sha], opts).ok;
+
+/**
+ * Restore specific tracked paths from HEAD, leaving everything else alone.
+ *
+ * `reset --hard` is the wrong tool in a dry run: no branch was created, so it
+ * would land on the user's own checkout and take their uncommitted work with
+ * it. Naming the paths keeps the blast radius to the files the session touched.
+ * @returns {boolean}
+ */
+const restorePaths = (files, opts) => {
+  if (!files || !files.length) return true;
+  return run(['checkout', 'HEAD', '--', ...files], opts).ok;
+};
 /** `git clean -fd` (never -x: ignored files such as .env are left alone). */
 const cleanUntracked = (opts) => run(['clean', '-fd'], opts).ok;
 
@@ -204,6 +217,6 @@ function ensureExcluded(root, dir, opts = {}) {
 
 module.exports = {
   git, isRepo, root, headSha, currentBranch, status, isDirty, recentCommits,
-  createBranch, checkout, stashPush, stashPop, stashExists, stashIndexOf, resetHard, cleanUntracked,
+  createBranch, checkout, stashPush, stashPop, stashExists, stashIndexOf, resetHard, restorePaths, cleanUntracked,
   changedFilesSince, branchExists, isTracked, deleteBranch, mergeBranch, commitAll, ensureExcluded };
 
