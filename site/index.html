@@ -97,8 +97,17 @@
   --display: 'Instrument Serif', ui-serif, Georgia, 'Times New Roman', serif;
 
   --gutter: clamp(20px, 5vw, 64px);
-  --max: 1240px;
+  /* Narrower than the viewport wants, on purpose: a drawing needs a margin,
+     and the section rail lives in it. */
+  --max: 1180px;
   --rail: 3px;
+
+  /* The sheet the page is drawn on. Both are near-invisible by design -- at
+     any strength where you consciously notice the grid, it is competing with
+     the text instead of supporting it. */
+  --grid:     rgba(232,237,234,.045);
+  --grid-dot: rgba(232,237,234,.13);
+  --cell: 80px;
 
   /* Read by JS as the end points of the scroll-linked temperature shift.
      They live here rather than in the script so the light theme can dial
@@ -119,6 +128,8 @@
     /* A wash that reads on near-black is a stain on near-white. */
     --glow-crimson-max: .16;
     --glow-phos-max: .13;
+    --grid: rgba(16,22,20,.055);
+    --grid-dot: rgba(16,22,20,.16);
   }
 }
 
@@ -153,6 +164,66 @@ body {
    reading about a crash and phosphor by the time you are reading about a
    verified fix. Opacity only -- these never trigger paint of anything else.
    -------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+   The sheet
+   --------------------------------------------------------------------------
+   The page is a technical drawing: a modular grid with a dot at every
+   intersection, and a few cells hatched to break the regularity. It is fixed
+   rather than scrolling, so it reads as the surface the content is drawn on
+   rather than as a pattern travelling with it. Three gradients, no images,
+   no JavaScript.
+   -------------------------------------------------------------------------- */
+.sheet {
+  position: fixed; inset: -1px; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px),
+    radial-gradient(circle at 1px 1px, var(--grid-dot) 1.4px, transparent 1.6px);
+  background-size: var(--cell) var(--cell);
+  /* Fade the grid out at the edges so it stops rather than getting cropped. */
+  -webkit-mask-image: radial-gradient(130% 105% at 50% 40%, #000 45%, transparent 100%);
+  mask-image: radial-gradient(130% 105% at 50% 40%, #000 45%, transparent 100%);
+}
+
+/* The hatched cells. Positioned on the grid in whole cells so they read as
+   part of the drawing, and drifting a little against the scroll so the sheet
+   has depth. Transform only -- nothing here forces layout or paint. */
+.hatch { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+.hatch i {
+  position: absolute; display: block;
+  width: calc(var(--cell) * var(--w, 2));
+  height: calc(var(--cell) * var(--h, 2));
+  left: calc(var(--cell) * var(--x));
+  top: calc(var(--cell) * var(--y));
+  background: repeating-linear-gradient(
+    45deg, var(--grid) 0 1px, transparent 1px 7px);
+}
+
+/* --------------------------------------------------------------------------
+   Section rail -- the drawing's margin marks, and the page's only navigation
+   Hidden below 1200px, where the margin no longer exists to hold it. Nothing
+   is lost: it duplicates in-page anchors that the footer also carries.
+   -------------------------------------------------------------------------- */
+.sheet-rail {
+  position: fixed; left: max(18px, calc((100vw - var(--max)) / 2 - 44px));
+  top: 50%; transform: translateY(-50%); z-index: 30;
+  display: none; flex-direction: column; gap: 2px;
+}
+@media (min-width: 1200px) { .sheet-rail { display: flex; } }
+.sheet-rail a {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  color: var(--dimmer); text-decoration: none; padding: 5px 0;
+  transition: color .25s;
+}
+.sheet-rail a::after {
+  content: ''; width: 8px; height: 1px; background: currentColor;
+  transition: width .25s;
+}
+.sheet-rail a:hover { color: var(--dim); }
+.sheet-rail a.on { color: var(--bone); }
+.sheet-rail a.on::after { width: 20px; background: var(--phos); }
+
 .glow { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
 #glow-crimson {
   opacity: var(--glow-crimson-max);
@@ -206,14 +277,13 @@ section { position: relative; z-index: 1; }
 .band { padding: clamp(76px, 11vw, 148px) 0; border-top: 1px solid var(--rule); }
 
 /* Section headers are set as a log entry: a mono marker, then the line. */
+/* Sheet annotation: all caps, tracked out, with the terminal's own cursor
+   parked at the end of it. */
 .eyebrow {
   font-family: var(--mono); font-size: 11.5px; letter-spacing: .16em;
   text-transform: uppercase; color: var(--dim); margin: 0 0 18px;
-  display: flex; align-items: center; gap: 12px;
 }
-.eyebrow::before {
-  content: ''; width: 22px; height: 1px; background: var(--dimmer); flex: 0 0 auto;
-}
+.eyebrow::after { content: '_'; color: var(--phos); }
 
 h2 {
   font-family: var(--display); font-weight: 400;
@@ -268,8 +338,14 @@ a:hover { text-decoration-color: var(--phos); }
 }
 /* `pre` goes on the lines, never on the container: on the container the
    newlines between the markup's own elements render as blank lines and the
-   terminal grows to several times its real height. */
-.term-body > * { white-space: pre; min-height: 1.85em; }
+   terminal grows to several times its real height.
+
+   `pre-wrap` rather than `pre` because a real terminal wraps a long line
+   rather than hiding the end of it behind a scrollbar -- and a stack trace
+   clipped mid-word reads as a broken layout, not as a transcript. */
+.term-body > * {
+  white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.85em;
+}
 .term-body .d { color: var(--dim); }        /* phantom's own chatter */
 .term-body .c { color: var(--crimson); }    /* the crash */
 .term-body .g { color: var(--phos); }       /* the verified fix */
@@ -306,14 +382,22 @@ h1 .fix em { font-style: italic; color: var(--phos); }
 }
 .cmd .pr { color: var(--phos); flex: 0 0 auto; }
 .cmd .txt { flex: 1 1 auto; overflow-x: auto; white-space: nowrap; }
+/* Icon, not a word: the label "copy" next to a shell command reads as part
+   of the command at a glance. */
 .copy {
-  flex: 0 0 auto; background: transparent; border: 1px solid var(--rule-hi);
-  color: var(--dim); font-family: var(--mono); font-size: 11px;
-  padding: 4px 9px; border-radius: 5px; cursor: pointer;
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 26px; height: 26px; padding: 0;
+  background: transparent; border: 1px solid var(--rule-hi); border-radius: 6px;
+  color: var(--dim); cursor: pointer;
   transition: color .16s, border-color .16s;
 }
+.copy svg { width: 13px; height: 13px; display: block; fill: none;
+  stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.copy .tick { display: none; }
 .copy:hover { color: var(--bone); border-color: var(--dim); }
 .copy.done { color: var(--phos); border-color: var(--phos); }
+.copy.done .mark { display: none; }
+.copy.done .tick { display: block; }
 
 .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
 .badge {
@@ -393,18 +477,42 @@ h1 .fix em { font-style: italic; color: var(--phos); }
 /* --------------------------------------------------------------------------
    The rails
    -------------------------------------------------------------------------- */
-.nevers {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1px; margin-top: 44px;
-  background: var(--rule); border: 1px solid var(--rule);
+/* A specimen sheet: one outer plate with a title block, holding six tiles
+   that each carry their own registration marks. */
+.plate {
+  margin-top: 44px; border: 1px solid var(--rule-hi); border-radius: 12px;
+  background: color-mix(in srgb, var(--ash) 55%, transparent);
+  overflow: hidden;
 }
-.never { background: var(--ink); padding: 26px 24px 28px; }
-.never .k {
+.plate-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  padding: 13px 18px; border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--dimmer);
+}
+.plate-head b { color: var(--dim); font-weight: 400; }
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+  gap: 14px; padding: 14px;
+}
+.tile {
+  position: relative; padding: 22px 20px 24px;
+  background: var(--ink); border-radius: 8px; border: 1px solid var(--rule);
+}
+/* Registration marks rather than a heavier border: two corners, the way a
+   drawing is trimmed. */
+.tile::before, .tile::after {
+  content: ''; position: absolute; width: 9px; height: 9px;
+  border-color: var(--rule-hi); border-style: solid; border-width: 0;
+}
+.tile::before { top: 7px; left: 7px; border-top-width: 1px; border-left-width: 1px; }
+.tile::after { bottom: 7px; right: 7px; border-bottom-width: 1px; border-right-width: 1px; }
+.tile .k {
   display: block; font-family: var(--mono); font-size: 12px;
-  letter-spacing: .04em; color: var(--phos); margin-bottom: 12px;
+  letter-spacing: .04em; color: var(--phos); margin-bottom: 11px;
 }
-.never p { margin: 0; font-size: 14.5px; color: var(--dim); }
-.never p strong { color: var(--bone); font-weight: 600; }
+.tile p { margin: 0; font-size: 14.5px; color: var(--dim); }
+.tile p strong { color: var(--bone); font-weight: 600; }
 
 .caveats { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 28px; }
 .caveat {
@@ -541,9 +649,29 @@ footer { border-top: 1px solid var(--rule); padding: 34px 0 44px; }
 }
 </style>
 
+<div class="sheet" aria-hidden="true"></div>
+<div class="hatch" id="hatch" aria-hidden="true">
+  <i style="--x:1;  --y:1;  --w:2; --h:1"></i>
+  <i style="--x:6;  --y:3;  --w:1; --h:2"></i>
+  <i style="--x:11; --y:1;  --w:2; --h:2"></i>
+  <i style="--x:3;  --y:7;  --w:1; --h:1"></i>
+  <i style="--x:14; --y:6;  --w:1; --h:2"></i>
+  <i style="--x:8;  --y:9;  --w:2; --h:1"></i>
+</div>
 <div class="glow" id="glow-crimson" aria-hidden="true"></div>
 <div class="glow" id="glow-phos" aria-hidden="true"></div>
 <div class="rail" aria-hidden="true"><i id="rail-fill"></i></div>
+
+<nav class="sheet-rail" id="sheet-rail" aria-label="Sections">
+  <a href="#top">01</a>
+  <a href="#takeover">02</a>
+  <a href="#safety">03</a>
+  <a href="#usage">04</a>
+  <a href="#limits">05</a>
+  <a href="#proof">06</a>
+  <a href="#faq">07</a>
+  <a href="#install">08</a>
+</nav>
 
 <!-- ============================== HERO ============================== -->
 <section class="hero" id="top">
@@ -566,8 +694,8 @@ footer { border-top: 1px solid var(--rule); padding: 34px 0 44px; }
       <p class="lede" data-rv>Wrap any command. If it dies, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix independently, and leaves a post-mortem. <strong>Your branch is never touched.</strong></p>
 
       <div class="install" data-rv-group>
-        <div class="cmd"><span class="pr">$</span><span class="txt" id="c1">npm install -g claude-phantom</span><button class="copy" data-c="c1">copy</button></div>
-        <div class="cmd"><span class="pr">$</span><span class="txt" id="c2">phantom npm run dev</span><button class="copy" data-c="c2">copy</button></div>
+        <div class="cmd"><span class="pr">$</span><span class="txt" id="c1">npm install -g claude-phantom</span><button class="copy" data-c="c1" aria-label="Copy: npm install -g claude-phantom"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10"/></svg></button></div>
+        <div class="cmd"><span class="pr">$</span><span class="txt" id="c2">phantom npm run dev</span><button class="copy" data-c="c2" aria-label="Copy: phantom npm run dev"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10"/></svg></button></div>
       </div>
 
       <div class="badges" data-rv-group>
@@ -659,30 +787,33 @@ footer { border-top: 1px solid var(--rule); padding: 34px 0 44px; }
     <h2 data-rv>It never commits<br>to your branch.</h2>
     <p class="lede" data-rv>Letting an agent loose in your repo is the objection, and it should be. Every rail below is a mechanism, not a promise — and each one is there because the alternative was tried and written down.</p>
 
-    <div class="nevers" data-rv-group>
-      <div class="never">
-        <span class="k">never your branch</span>
-        <p>A <code>phantom/fix-*</code> branch is cut from HEAD before any edit, and you are checked back out when it finishes — success or failure. <strong>The fix exists only as a branch to diff, merge, or delete.</strong></p>
-      </div>
-      <div class="never">
-        <span class="k">never your secrets</span>
-        <p><code>.env</code>, <code>*.pem</code>, <code>*.key</code>, <code>secrets/**</code> are enforced three ways: permission deny rules, a <code>PreToolUse</code> guard hook on every call, and a post-session audit that hard-reverts the branch on any hit.</p>
-      </div>
-      <div class="never">
-        <span class="k">never the network</span>
-        <p>No <code>WebFetch</code>, no <code>curl</code>, no <code>git push</code>. <strong>There is no push code path to configure.</strong></p>
-      </div>
-      <div class="never">
-        <span class="k">never a green lie</span>
-        <p>Phantom re-runs your tests itself, outside the session, and then re-runs the command that crashed. A session that claims success without changing anything is reported <code>unfixed</code>.</p>
-      </div>
-      <div class="never">
-        <span class="k">never unbounded</span>
-        <p><code>maxIterations</code>, <code>maxMinutes</code>, and a real spend ceiling — <code>maxTokens</code> or <code>maxCostUsd</code> — checked before each additional attempt.</p>
-      </div>
-      <div class="never">
-        <span class="k">Ctrl+C is a kill switch</span>
-        <p>Kills the process tree, rescues untracked work into a stash, resets the fix branch, checks your branch back out, exits 130. <code>SIGTERM</code> and <code>SIGHUP</code> do the same.</p>
+    <div class="plate" data-rv>
+      <div class="plate-head"><span>the rails</span><b>6 mechanisms · enforced, not promised</b></div>
+      <div class="tiles" data-rv-group>
+        <div class="tile">
+          <span class="k">never your branch</span>
+          <p>A <code>phantom/fix-*</code> branch is cut from HEAD before any edit, and you are checked back out when it finishes — success or failure. <strong>The fix exists only as a branch to diff, merge, or delete.</strong></p>
+        </div>
+        <div class="tile">
+          <span class="k">never your secrets</span>
+          <p><code>.env</code>, <code>*.pem</code>, <code>*.key</code>, <code>secrets/**</code> are enforced three ways: permission deny rules, a <code>PreToolUse</code> guard hook on every call, and a post-session audit that hard-reverts the branch on any hit.</p>
+        </div>
+        <div class="tile">
+          <span class="k">never the network</span>
+          <p>No <code>WebFetch</code>, no <code>curl</code>, no <code>git push</code>. <strong>There is no push code path to configure.</strong></p>
+        </div>
+        <div class="tile">
+          <span class="k">never a green lie</span>
+          <p>Phantom re-runs your tests itself, outside the session, and then re-runs the command that crashed. A session that claims success without changing anything is reported <code>unfixed</code>.</p>
+        </div>
+        <div class="tile">
+          <span class="k">never unbounded</span>
+          <p><code>maxIterations</code>, <code>maxMinutes</code>, and a real spend ceiling — <code>maxTokens</code> or <code>maxCostUsd</code> — checked before each additional attempt.</p>
+        </div>
+        <div class="tile">
+          <span class="k">Ctrl+C is a kill switch</span>
+          <p>Kills the process tree, rescues untracked work into a stash, resets the fix branch, checks your branch back out, exits 130. <code>SIGTERM</code> and <code>SIGHUP</code> do the same.</p>
+        </div>
       </div>
     </div>
 
@@ -807,8 +938,8 @@ footer { border-top: 1px solid var(--rule); padding: 34px 0 44px; }
     <h2 data-rv>Wrap one command.<br><span class="done">Forget about it.</span></h2>
     <p class="lede" data-rv>Then run <code>phantom doctor</code> once, before your first crash.</p>
     <div class="install" data-rv-group>
-      <div class="cmd"><span class="pr">$</span><span class="txt" id="c3">npm install -g claude-phantom</span><button class="copy" data-c="c3">copy</button></div>
-      <div class="cmd"><span class="pr">$</span><span class="txt" id="c4">phantom doctor</span><button class="copy" data-c="c4">copy</button></div>
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c3">npm install -g claude-phantom</span><button class="copy" data-c="c3" aria-label="Copy: npm install -g claude-phantom"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10"/></svg></button></div>
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c4">phantom doctor</span><button class="copy" data-c="c4" aria-label="Copy: phantom doctor"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10"/></svg></button></div>
     </div>
     <p class="fine" style="margin-top:22px" data-rv>Also installable as a Claude Code plugin — <code>/plugin marketplace add waazy-w/claude-phantom</code></p>
   </div>
@@ -855,10 +986,11 @@ document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('.copy').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var text = document.getElementById(btn.dataset.c).textContent;
+      // Class only -- the button's content is two SVGs, and writing
+      // textContent would delete them.
       var done = function () {
-        btn.textContent = 'copied';
         btn.classList.add('done');
-        setTimeout(function () { btn.textContent = 'copy'; btn.classList.remove('done'); }, 1600);
+        setTimeout(function () { btn.classList.remove('done'); }, 1600);
       };
       if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function () {}); return; }
       // execCommand is the fallback for non-secure origins, where
@@ -941,6 +1073,28 @@ document.addEventListener('DOMContentLoaded', function () {
   };
 
   scroll(animate('#rail-fill', { transform: ['scaleY(0)', 'scaleY(1)'] }, { ease: 'linear' }));
+
+  /* The hatched cells drift against the scroll. A small range on a fixed
+     layer -- enough to separate the sheet from the words sitting on it,
+     not enough to read as parallax. */
+  if (!reduce) {
+    scroll(animate('#hatch', { transform: ['translateY(0px)', 'translateY(-90px)'] },
+                   { ease: 'linear' }));
+  }
+
+  /* Section rail. Whichever section most recently claimed the middle of the
+     viewport is the one you are reading. */
+  (function () {
+    var links = [].slice.call(document.querySelectorAll('.sheet-rail a'));
+    if (!links.length) return;
+    links.forEach(function (a) {
+      var section = document.querySelector(a.getAttribute('href'));
+      if (!section) return;
+      inView(section, function () {
+        links.forEach(function (b) { b.classList.toggle('on', b === a); });
+      }, { amount: 0.001, margin: '-45% 0px -45% 0px' });
+    });
+  })();
   scroll(animate('#glow-crimson', { opacity: [token('--glow-crimson-max', .55), 0] }, { ease: 'linear' }));
   scroll(animate('#glow-phos', { opacity: [0, token('--glow-phos-max', .42)] }, { ease: 'linear' }));
 
