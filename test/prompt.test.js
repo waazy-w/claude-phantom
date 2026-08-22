@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {
-  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
+  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv, flattenForArgv,
   loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName,
   CONTEXT_BYTE_BUDGET, PHANTOM_FILLS, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 } = require('../src/prompt');
@@ -615,4 +615,42 @@ test('newSessionId returns distinct UUIDs in the shape claude requires', () => {
   for (const id of [a, b]) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   // The generated id must survive its own validator, or a real recovery throws.
   assert.equal(buildClaudeArgs({ settings: {}, sessionId: a })[buildClaudeArgs({ settings: {}, sessionId: a }).indexOf('--session-id') + 1], a);
+});
+
+test('no argument phantom passes to claude contains a newline', () => {
+  // A literal newline is fine for a direct spawn and FATAL through cmd.exe: it
+  // terminates the command line. On Windows a claude installed by npm is a
+  // `.cmd` shim, which windowsSafeSpawn routes through cmd.exe -- so a
+  // multi-line --append-system-prompt truncated the whole invocation and the
+  // session ran with no rules and no crash context. Windows-only, and only once
+  // the rules moved out of the user turn, where newlines had always been safe
+  // because that text goes in over stdin.
+  //
+  // Asserted across ALL arguments, not just the one that broke: the next
+  // multi-line value someone passes should fail here rather than on a Windows
+  // CI job an hour later.
+  const config = { neverTouch: ['.env', '**/*.pem'], maxIterations: 3, maxMinutes: 15 };
+  const args = buildClaudeArgs({
+    settings: { permissions: { deny: ['Bash(git push *)'] } },
+    allowedTools: ['Read', 'Bash(npm test)'],
+    disallowedTools: ['WebFetch'],
+    model: 'sonnet',
+    sessionId: '9f2c1a44-6b0e-4d51-a3f2-1e77c2b5a904',
+    name: 'phantom: TypeError in report.js',
+    appendSystemPrompt: buildSystemPrompt(config, { dryRun: false }),
+  });
+  for (const [i, arg] of args.entries()) {
+    assert.ok(!/[\r\n]/.test(String(arg)),
+      'argv[' + i + '] carries a newline: ' + JSON.stringify(String(arg).slice(0, 80)));
+  }
+
+  // The content survives the flattening -- this is a reformat, not a truncation.
+  const sp = args[args.indexOf('--append-system-prompt') + 1];
+  assert.ok(sp.length > 500, 'the rules are still all there: ' + sp.length + ' chars');
+  assert.match(sp, /never/i, 'including the prohibitions');
+
+  // And the helper itself drops blank lines rather than leaving empty joins.
+  assert.strictEqual(flattenForArgv('a\n\n  b  \nc'), 'a · b · c');
+  assert.strictEqual(flattenForArgv('one line'), 'one line');
+  assert.strictEqual(flattenForArgv('crlf\r\nhandled'), 'crlf · handled');
 });

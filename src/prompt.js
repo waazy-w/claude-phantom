@@ -364,6 +364,30 @@ function buildSettings(config, guardEnvJson, hookScriptPath = path.join(__dirnam
  *           appendSystemPrompt?: string|null, maxTurns?: number }} opts
  * @returns {string[]}
  */
+/**
+ * Fold a multi-line string into one line, for passing as a command-line
+ * argument.
+ *
+ * A literal newline in an argument is fine for a direct spawn and fatal through
+ * cmd.exe: it TERMINATES the command line. On Windows a `claude` installed by
+ * npm is a `.cmd` shim, which `windowsSafeSpawn` routes through cmd.exe -- so
+ * a multi-line --append-system-prompt truncated the invocation and the session
+ * ran with no rules and no crash context. It failed on Windows only, and only
+ * once the rules moved out of the user turn, where newlines had always been
+ * safe because that text goes in over stdin.
+ *
+ * Flattened on every platform rather than only on win32: a rule that exists in
+ * two different forms depending on the operating system is the shape of bug
+ * this project keeps finding, and a model reads a bulleted line just as well.
+ */
+function flattenForArgv(text) {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(' · ');
+}
+
 function buildClaudeArgs(opts) {
   // project,local only: user-level hooks, allows, and env must not leak into the
   // recovery session (a global PreToolUse hook that rewrites commands would
@@ -394,7 +418,7 @@ function buildClaudeArgs(opts) {
   if (opts.name) args.push('--name', String(opts.name));
   // Passed on every invocation, resumes included -- that is the whole point of
   // moving the hard rules here (see buildSystemPrompt).
-  if (opts.appendSystemPrompt) args.push('--append-system-prompt', String(opts.appendSystemPrompt));
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', flattenForArgv(String(opts.appendSystemPrompt)));
   if (opts.allowedTools && opts.allowedTools.length) args.push('--allowedTools', ...opts.allowedTools);
   if (opts.disallowedTools && opts.disallowedTools.length) args.push('--disallowedTools', ...opts.disallowedTools);
   args.push('--settings', typeof opts.settings === 'string' ? opts.settings : JSON.stringify(opts.settings));
@@ -438,6 +462,6 @@ function buildClaudeEnv(base = process.env) {
 
 module.exports = {
   buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
-  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName, shellSingleQuote,
+  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName, shellSingleQuote, flattenForArgv,
   KEEP_CLAUDE_ENV, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 };
