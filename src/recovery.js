@@ -257,6 +257,14 @@ const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : '');
 /**
  * The exact command that restores THIS stash, for a human to run.
  *
+ * The sha is printed IN FULL, never abbreviated. `git stash` parses a numeric
+ * argument as a stack index, and a 10-character abbreviation is all digits
+ * about 1% of the time -- at which point `git stash apply 2358190719` silently
+ * applies stash@{0} instead of the entry phantom took, which is precisely the
+ * wrong-stash data loss this whole mechanism exists to prevent. A 40-character
+ * sha cannot be read as an index. Found by a Windows CI run that drew such a
+ * sha; it would have failed on any platform, roughly one run in a hundred.
+ *
  * `apply`, not `pop`, and by sha. A bare `git stash pop` is only correct while
  * phantom's entry is still on top of the stack, which phantom cannot know --
  * the user's other shell, a `git pull --autostash`, or a second phantom run all
@@ -268,7 +276,7 @@ const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : '');
  * however the stack moves, and leaves the entry in place until the user is
  * satisfied -- which is the safer default for someone recovering work anyway.
  */
-const popHint = (s) => (s.stashRef ? 'git stash apply ' + shortSha(s.stashRef) : 'git stash pop');
+const popHint = (s) => (s.stashRef ? 'git stash apply ' + s.stashRef : 'git stash pop');
 
 /**
  * `stash@{n}` for `ref` right now, for the one message that has to name a
@@ -373,7 +381,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         const untracked = git.untrackedFiles(opts).filter((f) => !f.startsWith(phantomDirName + '/'));
         if (untracked.length) {
           const rescue = git.stashPaths('phantom-rescue-' + timestamp(), untracked, opts);
-          if (rescue) log.warn('rescued ' + untracked.length + ' untracked file(s) into a stash before cleaning: git stash apply ' + shortSha(rescue));
+          if (rescue) log.warn('rescued ' + untracked.length + ' untracked file(s) into a stash before cleaning: git stash apply ' + rescue);
           else log.warn('about to remove untracked files that could not be stashed: ' + untracked.join(', '));
         }
         if (!git.resetHard(s.baseSha, opts)) failed.push('discard the session\'s changes');
@@ -883,9 +891,14 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, b
     lines.push('report  ' + colors.cyan(path.relative(s.root, final.reportPath)));
   }
   if (final.sessionId) lines.push('session ' + colors.dim(final.sessionId + '  (claude --resume ' + final.sessionId + ')'));
-  if (restoreHint) lines.push(colors.yellow('your stashed changes: ' + restoreHint));
+  if (restoreHint) lines.push(colors.yellow('your stashed changes — the command is printed below the box'));
   const color = final.status === 'fixed' ? colors.green : final.status === 'dry-run' ? colors.cyan : colors.yellow;
   ui.banner(lines, { color });
+  // Outside the box, deliberately. The banner wraps on spaces to keep its
+  // border straight, which splits a 40-character sha across two lines and hands
+  // the user a command that does not run when pasted. A recovery command has to
+  // survive being copied more than it has to sit inside a border.
+  if (restoreHint) log.warn('your stashed changes: ' + restoreHint);
 }
 
 module.exports = { runRecovery, pruneDir, uniqueStamp, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };

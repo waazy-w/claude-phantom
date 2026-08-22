@@ -677,9 +677,12 @@ test('a snapshot stash that cannot be popped is reported, never silently forgott
   // `git stash pop <sha>` and `git stash drop <sha>` are rejected by git ("is
   // not a stash reference"); `apply` is the one form that takes a commit, and
   // it still reaches a dropped entry before gc collects it.
-  assert.match(out, /snapshot stash was dropped while phantom was working.*git stash apply [0-9a-f]{10}/);
-  // And the banner keeps pointing at it after the summary, where it is read.
-  assert.match(out, /your stashed changes: git stash apply [0-9a-f]{10}/);
+  assert.match(out, /snapshot stash was dropped while phantom was working.*git stash apply [0-9a-f]{40}/);
+  // And it is repeated after the summary, where it is read -- outside the box,
+  // because the banner wraps on spaces and would split the sha in half.
+  assert.match(out, /your stashed changes: git stash apply [0-9a-f]{40}/);
+  const line = out.split('\n').find((l) => l.includes('your stashed changes: git stash apply'));
+  assert.ok(!line.includes('│'), 'the copyable command is not inside the wrapped box: ' + line);
   assert.equal(sh(repo, ['symbolic-ref', '--short', 'HEAD']), 'main');
 });
 
@@ -1027,7 +1030,7 @@ test('aborting rescues untracked work instead of deleting it', async () => {
   assert.equal(res.status, 'aborted');
   assert.ok(!fs.existsSync(path.join(repo, 'my-new-file.js')), 'the tree really was cleaned');
 
-  const hint = /git stash apply ([0-9a-f]{10})/.exec(out);
+  const hint = /git stash apply ([0-9a-f]{40})/.exec(out);
   assert.ok(hint, 'phantom said where the file went: ' + out);
   execFileSync('git', ['stash', 'apply', hint[1]], { cwd: repo, stdio: 'pipe' });
   assert.equal(fs.readFileSync(path.join(repo, 'my-new-file.js'), 'utf8'), 'work I just started\n',
@@ -1065,4 +1068,20 @@ test('two crashes in the same second do not overwrite each other', async () => {
     assert.equal((md.match(/## Verification \(independent\)/g) || []).length, 1,
       'one report describes one run: ' + path.basename(p));
   }
+});
+
+test('the stash hint never abbreviates the sha, because git reads digits as an index', () => {
+  // `git stash apply 2358190719` does not fail -- it applies stash@{0}, because
+  // git parses a numeric argument as a stack INDEX. A 10-character abbreviation
+  // is all digits about 1% of the time (10/16 ^ 10), so one run in a hundred
+  // would hand the user a command that silently restores the wrong stash: the
+  // exact data loss the by-sha mechanism exists to prevent. Caught by a Windows
+  // CI run that happened to draw such a sha; it was never Windows-specific.
+  const { popHint } = require('../src/recovery');
+  if (typeof popHint !== 'function') return; // not exported; the CLI assertions below still cover it
+  const full = '2358190719238a63532566ee49047f0aa0a79872';
+  assert.equal(popHint({ stashRef: full }), 'git stash apply ' + full);
+  const arg = popHint({ stashRef: full }).split(' ').pop();
+  assert.equal(arg.length, 40, 'full sha, not an abbreviation');
+  assert.doesNotMatch(arg, /^\d+$/, 'and never something git could read as an index');
 });

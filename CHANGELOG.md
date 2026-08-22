@@ -65,6 +65,12 @@ before any of it shipped. Those two teams found 14 problems in code that already
 
 ### Fixed
 
+- **The stash-restore hint could point at the wrong stash.** `git stash` parses a numeric
+  argument as a stack *index*, and a 10-character sha abbreviation is all digits about 1%
+  of the time — so `git stash apply 2358190719` silently applied `stash@{0}` instead of
+  phantom's entry, which is exactly the data loss the by-sha mechanism was added to
+  prevent in 0.3.6. Shas are printed in full now, and the copyable command is printed
+  outside the banner box, because the box wraps on spaces and split it in half.
 - **`phantom recover --help` started a real recovery.** The subcommand parsed `--help` and
   then never looked at it, so asking for help stashed, branched, patched and spent. Help
   and `--version` are answered for every subcommand before anything is loaded or spawned.
