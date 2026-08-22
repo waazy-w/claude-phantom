@@ -633,7 +633,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const sessionLabel = prompt.sessionName(ctx);
     // Built once, outside the loop: it is a stable cache prefix, and anything
     // per-attempt in here would destroy that.
-    const systemPrompt = prompt.buildSystemPrompt(config, { dryRun });
+    const systemPrompt = prompt.SYSTEM_REMINDER;
     s.sessionId = plannedSessionId;
     let sessionId = null;
     let lastClaude = null;

@@ -94,6 +94,27 @@ function loadProcedure() {
  * @param {{ dryRun?: boolean }} [opts]
  * @returns {string}
  */
+/**
+ * A short, ASCII-only, single-line restatement of the rules that must survive
+ * compaction.
+ *
+ * This is deliberately NOT the full rules text. It goes in as a command-line
+ * argument, and on Windows a `claude` installed by npm is a `.cmd` shim routed
+ * through cmd.exe -- where a multi-kilobyte value full of backticks and
+ * markdown broke the invocation outright: four Windows jobs red, and the fake
+ * session never spawned at all. The full rules ride in the first user turn,
+ * over stdin, where none of that applies.
+ *
+ * What is kept here is only what is unrecoverable if it is forgotten mid-run.
+ */
+const SYSTEM_REMINDER = [
+  'You are claude-phantom\'s autonomous recovery agent.',
+  'Never weaken or delete a test to make it pass.',
+  'Never commit, push, or change branches; phantom owns git.',
+  'Never read or write never-touch files.',
+  'Work only inside the repository you were started in.',
+].join(' ');
+
 function buildSystemPrompt(config, opts = {}) {
   const rules = loadHardRules();
   const neverTouch = (config && config.neverTouch) || [];
@@ -238,11 +259,16 @@ function buildPrompt(ctx, config, opts) {
     '',
     '## Procedure',
     '',
-    'The hard rules are in your system prompt, not below. They apply to every phase.',
+    'The hard rules below apply to every phase, and are repeated in your system prompt.',
     '',
     // Phases only. The hard rules travel in --append-system-prompt instead, so
     // they are re-sent on every request and cannot be compacted away mid-fix.
-    loadProcedure(),
+    // The FULL rules travel here, in the first user turn, which goes in over
+    // stdin -- no length limit, no shell, no escaping. The system prompt gets a
+    // short reminder instead (see SYSTEM_REMINDER): a 3.4 KB argument carrying
+    // 116 backticks and a non-ASCII separator through a Windows .cmd shim
+    // stopped the session spawning at all, and the fixture never ran.
+    loadSkill(),
     '',
     context.text,
     '',
@@ -462,6 +488,6 @@ function buildClaudeEnv(base = process.env) {
 
 module.exports = {
   buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
-  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName, shellSingleQuote, flattenForArgv,
+  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName, shellSingleQuote, flattenForArgv, SYSTEM_REMINDER,
   KEEP_CLAUDE_ENV, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 };

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {
-  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv, flattenForArgv,
+  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv, flattenForArgv, SYSTEM_REMINDER,
   loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName,
   CONTEXT_BYTE_BUDGET, PHANTOM_FILLS, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 } = require('../src/prompt');
@@ -548,12 +548,31 @@ test('buildSystemPrompt carries the rules, the never-touch list and nothing per-
   assert.ok(buildSystemPrompt({ neverTouch: [] }).includes('NEVER run `git checkout`'), 'no never-touch list still yields rules');
 });
 
-test('the hard rules are no longer in the user turn that compaction can eat', () => {
+test('the full rules ride in the user turn; the system prompt carries a short reminder', () => {
+  // These live in two places on purpose, and the split is about TRANSPORT.
+  //
+  // The first user turn goes in over stdin: no length limit, no shell, no
+  // escaping. The system prompt goes in as a command-line argument, and on
+  // Windows a `claude` installed by npm is a `.cmd` shim routed through
+  // cmd.exe -- where a 3.4 KB value carrying 116 backticks and a non-ASCII
+  // separator stopped the session spawning at all. Four Windows jobs went red
+  // and the fake session never ran once.
+  //
+  // So the full rules go where size is free, and what is re-sent on every
+  // request is short, single-line and ASCII -- carrying only what is
+  // unrecoverable if it is forgotten mid-run.
   const p = buildPrompt(ctx, config, opts);
-  assert.ok(!p.includes(HARD_RULES_HEADING), 'rules not restated in the first turn');
-  assert.ok(!p.includes('NEVER run `git checkout`'));
-  assert.ok(p.includes('## Phase 0 - Orient'), 'the phases still are');
-  assert.ok(p.includes('The hard rules are in your system prompt'), 'the turn says where they went');
+  assert.ok(p.includes(HARD_RULES_HEADING), 'the full rules are in the first turn');
+  assert.ok(p.includes('## Phase 0 - Orient'), 'and so are the phases');
+
+  assert.ok(SYSTEM_REMINDER.length < 400, 'the reminder stays small: ' + SYSTEM_REMINDER.length);
+  assert.ok(!/[^\x00-\x7F]/.test(SYSTEM_REMINDER), 'ASCII only, for cmd.exe');
+  assert.ok(!SYSTEM_REMINDER.includes('`'), 'no backticks, for cmd.exe');
+  assert.ok(!/[\r\n]/.test(SYSTEM_REMINDER), 'one line, because a newline ends a cmd command');
+  // The prohibitions that cannot be recovered from must survive compaction.
+  for (const rule of [/never weaken or delete a test/i, /never commit, push, or change branches/i, /never read or write never-touch/i]) {
+    assert.match(SYSTEM_REMINDER, rule);
+  }
 });
 
 test('buildResumePrompt points at the system prompt, not at a turn that may be gone', () => {
