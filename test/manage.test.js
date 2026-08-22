@@ -401,7 +401,12 @@ test('runList renders every section, newest first, and honours --limit', async (
   fixBranch(dir, 'phantom/fix-open-bbb22', 'phantom: WIP (unfixed) ENOENT', 1);
 
   await quiet(async () => {
+    // isTTY, explicitly: this is the aligned human view, and which view `ls`
+    // renders now depends on the destination. Left to the default the assertions
+    // below would pass or fail according to whether the developer running the
+    // suite had a terminal attached.
     const out = capture();
+    out.isTTY = true;
     assert.equal(await manage.runList([], { cwd: dir, out }), 0);
     const text = out.text();
     assert.match(text, /fix branches \(2\)/);
@@ -418,6 +423,7 @@ test('runList renders every section, newest first, and honours --limit', async (
     assert.match(text, /\(on main\)/);
 
     const limited = capture();
+    limited.isTTY = true;
     await manage.runList(['--limit', '1'], { cwd: dir, out: limited });
     assert.match(limited.text(), /… 1 more/);
     assert.equal(limited.text().includes('phantom/fix-merged-aaa11'), false, 'trimmed to the newest');

@@ -93,18 +93,165 @@ test('spinner paints a frame with elapsed time and clears the line when stopped'
   }
 });
 
-test('a disabled spinner is silent, and log lines never collide with a live one', () => {
+// A timer seam: hands back the scheduled callback so a two-minute heartbeat can
+// be fired on demand instead of waited for.
+const fakeTimers = () => {
+  const t = { scheduled: [], cleared: [] };
+  t.setInterval = (fn, ms) => { const handle = { fn, ms }; t.scheduled.push(handle); return handle; };
+  t.clearInterval = (handle) => { t.cleared.push(handle); };
+  t.fire = () => { for (const h of t.scheduled) if (!t.cleared.includes(h)) h.fn(); };
+  t.opts = { setInterval: t.setInterval, clearInterval: t.clearInterval };
+  return t;
+};
+
+test('spinner clips its line to the terminal width rather than wrapping', () => {
+  // CLEAR_LINE erases one physical row, so a wrapped frame leaves its first row
+  // on screen and every repaint smears another copy down the terminal.
+  const out = capture();
+  out.columns = 48;
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+  ui.setStream(out);
+  try {
+    const spin = ui.spinner('replaying ' + 'very/long/path/'.repeat(8), { enabled: true, now: () => 0 });
+    const first = out.text().slice(CLEAR.length);
+    assert.strictEqual(ui.visibleLength(first), 47, 'one column short of the width: ' + first);
+    assert.ok(first.startsWith('phantom › ⠋ replaying very/'), first);
+    assert.ok(first.endsWith('… 0s'), 'the head and the clock survive; the middle is elided: ' + first);
+
+    // Re-read per frame, so a resize mid-run needs no resize handler.
+    out.columns = 30;
+    spin.tick();
+    const resized = out.text().split(CLEAR).pop();
+    assert.strictEqual(ui.visibleLength(resized), 29, resized);
+    assert.ok(resized.endsWith('… 0s'), resized);
+
+    // A line that already fits is passed through untouched -- no stray ellipsis.
+    out.columns = 200;
+    spin.update('short');
+    assert.strictEqual(out.text().split(CLEAR).pop(), 'phantom › ⠙ short 0s');
+    spin.stop();
+  } finally {
+    ui.setStream(null);
+    if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
+  }
+});
+
+test('a stream that reports no width is never clipped', () => {
+  // A capture stream, a pipe: guessing 80 here would truncate real output.
   const out = capture();
   const saved = process.env.NO_COLOR;
   process.env.NO_COLOR = '1';
   ui.setStream(out);
   try {
-    const quiet = ui.spinner('invisible', { enabled: false, now: () => 0 });
-    quiet.tick();
-    quiet.update('still invisible');
-    quiet.stop();
-    assert.strictEqual(out.text(), '', 'nothing is drawn when disabled');
+    const spin = ui.spinner('x'.repeat(300), { enabled: true, now: () => 0 });
+    assert.strictEqual(ui.visibleLength(out.text().slice(CLEAR.length)), 12 + 300 + 3);
+    spin.stop();
+  } finally {
+    ui.setStream(null);
+    if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
+  }
+});
 
+test('bell rings only on a TTY, only past 30s, and never with PHANTOM_BELL=0', () => {
+  const savedEnv = process.env.PHANTOM_BELL;
+  const tty = capture();
+  tty.isTTY = true;
+  ui.setStream(tty);
+  try {
+    delete process.env.PHANTOM_BELL;
+    assert.strictEqual(ui.bell(30000), false, '30s is not "over 30s"');
+    assert.strictEqual(ui.bell(29999), false);
+    assert.strictEqual(tty.text(), '', 'a short run makes no sound');
+    assert.strictEqual(ui.bell(30001), true);
+    assert.strictEqual(tty.text(), '\u0007', 'exactly one BEL, nothing else');
+
+    process.env.PHANTOM_BELL = '0';
+    assert.strictEqual(ui.bell(10 * 60 * 1000), false, 'PHANTOM_BELL=0 opts out');
+    assert.strictEqual(tty.text(), '\u0007', 'and adds no further bell');
+  } finally {
+    ui.setStream(null);
+    if (savedEnv === undefined) delete process.env.PHANTOM_BELL; else process.env.PHANTOM_BELL = savedEnv;
+  }
+
+  // A BEL byte in a piped log or a CI transcript is corruption, not a nudge.
+  const pipe = capture();
+  ui.setStream(pipe);
+  try {
+    assert.strictEqual(ui.bell(60 * 60 * 1000), false, 'no TTY, no bell');
+    assert.strictEqual(pipe.text(), '');
+  } finally { ui.setStream(null); }
+});
+
+test('a disabled spinner stays silent until the heartbeat fires', () => {
+  // Was "nothing is drawn when disabled" outright. A non-TTY run that prints
+  // nothing for fifteen minutes is indistinguishable from a hang to a human
+  // tailing the log and fatal to a CI runner with a no-output timeout.
+  const out = capture();
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+  ui.setStream(out);
+  const timers = fakeTimers();
+  let clock = 0;
+  try {
+    const quiet = ui.spinner('replaying the crash', { enabled: false, now: () => clock, ...timers.opts });
+    quiet.tick();
+    quiet.update('still replaying the crash');
+    assert.strictEqual(out.text(), '', 'nothing is drawn, and nothing animates, when disabled');
+    assert.strictEqual(timers.scheduled.length, 1, 'exactly one timer: the heartbeat');
+    assert.strictEqual(timers.scheduled[0].ms, 120000, 'every two minutes by default');
+
+    clock = 4 * 60 * 1000;
+    timers.fire();
+    assert.strictEqual(out.text(), 'phantom › still working — 4m elapsed, still replaying the crash\n',
+      'a plain line, the injected clock, and the current label');
+
+    const before = out.text();
+    quiet.stop();
+    timers.fire();
+    assert.strictEqual(out.text(), before, 'stop() clears the heartbeat');
+    // Cleared, not merely guarded: an uncleared interval goes on waking the
+    // event loop every two minutes for the rest of the process.
+    assert.deepStrictEqual(timers.cleared, [timers.scheduled[0]]);
+    // And separately: a callback already in flight when stop() lands must not
+    // print either. Called directly, past the "was it cleared" bookkeeping, so
+    // this proves the guard inside the heartbeat rather than the clear.
+    timers.scheduled[0].fn();
+    assert.strictEqual(out.text(), before, 'a fired-anyway heartbeat still prints nothing after stop()');
+  } finally {
+    ui.setStream(null);
+    if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
+  }
+});
+
+test('the heartbeat never fires while the spinner is animating', () => {
+  // On a TTY the ticking clock already says "alive"; a heartbeat line would
+  // punch a permanent row through the middle of the animation.
+  const out = capture();
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+  ui.setStream(out);
+  const timers = fakeTimers();
+  try {
+    const spin = ui.spinner('working', { enabled: true, now: () => 9 * 60 * 1000, ...timers.opts });
+    assert.strictEqual(timers.scheduled[0].ms, 120, 'the animation interval, not the heartbeat one');
+    timers.fire();
+    timers.fire();
+    assert.ok(!out.text().includes('still working —'), out.text());
+    assert.ok(out.text().endsWith('phantom › ⠹ working 0s'), 'the scheduled timer is the repaint');
+    spin.stop();
+  } finally {
+    ui.setStream(null);
+    if (saved === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = saved;
+  }
+});
+
+test('log lines never collide with a live spinner', () => {
+  const out = capture();
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+  ui.setStream(out);
+  try {
     const spin = ui.spinner('working', { enabled: true, now: () => 0 });
     const started = out.text();
     ui.log.warn('heads up');

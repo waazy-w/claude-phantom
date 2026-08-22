@@ -153,6 +153,9 @@ function write(line) {
 
 const CLEAR_LINE = '\r' + ESC + '[2K';
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const BEL = '\u0007';
+const BELL_AFTER_MS = 30000;
+const HEARTBEAT_MS = 120000;
 
 /** The spinner currently painting the last line of stderr, if any. */
 let live = null;
@@ -167,6 +170,59 @@ function formatElapsed(ms) {
 }
 
 /**
+ * Fit one spinner frame into `columns`, eliding the middle.
+ *
+ * CLEAR_LINE is '\r' + erase-line, which wipes ONE physical row. A frame wider
+ * than the terminal wraps onto a second row, so the next repaint 120ms later
+ * clears only the row the cursor ended on and leaves the first behind -- the
+ * status line smears down the screen instead of animating in place. Reproduced
+ * at 48 columns and narrower with today's fixed labels; variable-length labels
+ * make it a certainty rather than a narrow-terminal edge case.
+ *
+ * The head (prefix + braille frame) and the trailing clock are the parts a user
+ * actually reads, so the label's tail is what gets elided. `columns - 1` because
+ * writing into the final cell makes some terminals wrap eagerly, which costs the
+ * same second row.
+ */
+function fitSpinnerLine(head, label, tail, columns) {
+  const limit = Number(columns) - 1;
+  // No reported width (a pipe, or a stream that does not track a size): there is
+  // nothing to clip against, and guessing 80 would truncate a wide terminal.
+  if (!Number.isFinite(limit) || limit < 1) return head + label + tail;
+  const room = limit - visibleLength(head) - visibleLength(tail);
+  if (visibleLength(label) <= room) return head + label + tail;
+  // sliceColumns counts an escape sequence as printable width, so slice the
+  // label stripped. Labels are plain text today; a coloured one loses its colour
+  // only in the frames where it would not have fit anyway.
+  if (room >= 1) {
+    const plain = String(label).replace(ANSI_RE, '');
+    return head + (room === 1 ? '…' : sliceColumns(plain, room - 1) + '…') + tail;
+  }
+  // Narrower than prefix + clock. Nothing can be preserved, but a hard slice of
+  // the whole line still beats wrapping, which is what smears.
+  return sliceColumns((head + label + tail).replace(ANSI_RE, ''), limit);
+}
+
+/**
+ * Ring the terminal bell once, for a run long enough that the user walked away.
+ *
+ * Gated three ways, because an unwanted bell is worse than a missed one: only on
+ * a TTY (a bell byte in a piped log or a CI transcript is corruption), only past
+ * BELL_AFTER_MS, and never with PHANTOM_BELL=0. BEL does not move the cursor, so
+ * this is safe to call while a spinner is painting.
+ *
+ * @param {number} elapsedMs how long the run took
+ * @returns {boolean} whether the bell was actually written
+ */
+function bell(elapsedMs) {
+  if (!stream.isTTY) return false;
+  if (process.env.PHANTOM_BELL === '0') return false;
+  if (!(Number(elapsedMs) > BELL_AFTER_MS)) return false;
+  stream.write(BEL);
+  return true;
+}
+
+/**
  * An animated status line for phases that are slow and silent -- the Claude
  * session mainly, which can sit for minutes with nothing to print. The elapsed
  * counter is the point: it is the difference between "this is working" and
@@ -177,11 +233,19 @@ function formatElapsed(ms) {
  * collision, so the spinner goes silent and the static log line that precedes
  * it carries the message on its own.
  *
+ * When it is silent it is not idle: see the heartbeat below.
+ *
  * @param {string} text
- * @param {{ enabled?: boolean, intervalMs?: number, now?: () => number }} [opts]
+ * @param {{ enabled?: boolean, intervalMs?: number, heartbeatMs?: number, now?: () => number,
+ *          setInterval?: Function, clearInterval?: Function }} [opts]
  */
 function spinner(text, opts = {}) {
   const now = opts.now || Date.now;
+  // Timer seam, so tests can fire a two-minute heartbeat without waiting two
+  // minutes -- and so "the heartbeat never fires while animating" is provable
+  // rather than assumed.
+  const setTimer = opts.setInterval || setInterval;
+  const clearTimer = opts.clearInterval || clearInterval;
   const started = now();
   const enabled = opts.enabled === undefined ? Boolean(stream.isTTY) : Boolean(opts.enabled);
   let label = String(text);
@@ -192,15 +256,18 @@ function spinner(text, opts = {}) {
   const api = {
     render() {
       if (!enabled || stopped) return;
-      stream.write(CLEAR_LINE + colors.dim('phantom ›') + ' ' + colors.cyan(FRAMES[frame % FRAMES.length])
-        + ' ' + label + ' ' + colors.dim(formatElapsed(now() - started)));
+      const head = colors.dim('phantom ›') + ' ' + colors.cyan(FRAMES[frame % FRAMES.length]) + ' ';
+      const tail = ' ' + colors.dim(formatElapsed(now() - started));
+      // stream.columns is read per frame, not captured once: a terminal resized
+      // mid-run then costs nothing extra to handle correctly.
+      stream.write(CLEAR_LINE + fitSpinnerLine(head, label, tail, stream.columns));
     },
     tick() { frame += 1; api.render(); },
     update(next) { label = String(next); api.render(); },
     stop() {
       if (stopped) return;
       stopped = true;
-      if (timer) clearInterval(timer);
+      if (timer) clearTimer(timer);
       if (live === api) live = null;
       if (enabled) stream.write(CLEAR_LINE);
     },
@@ -209,10 +276,23 @@ function spinner(text, opts = {}) {
   if (enabled) {
     live = api;
     api.render();
-    timer = setInterval(api.tick, Math.max(1, opts.intervalMs || 120));
-    // Never let the animation be the reason the process stays alive.
-    if (timer.unref) timer.unref();
+    timer = setTimer(api.tick, Math.max(1, opts.intervalMs || 120));
+  } else {
+    // Heartbeat for the silent branch. Without it a non-TTY run -- CI, `2>&1 |
+    // tee`, `| less` -- emits ZERO bytes for up to fifteen minutes between two
+    // log lines, which is byte-for-byte what a hang looks like to someone tailing
+    // it, and which CI runners with a no-output timeout will kill outright. A
+    // plain line rather than a repaint, because the reason this branch is silent
+    // is that nothing here can redraw.
+    timer = setTimer(() => {
+      if (stopped) return;
+      const minutes = Math.floor((now() - started) / 60000);
+      write('still working — ' + minutes + 'm elapsed, ' + label);
+    }, Math.max(1, opts.heartbeatMs || HEARTBEAT_MS));
   }
+  // Never let the animation -- or the heartbeat -- be the reason the process
+  // stays alive.
+  if (timer && timer.unref) timer.unref();
   return api;
 }
 
@@ -320,4 +400,4 @@ function setStream(s) {
   stream = s || process.stderr;
 }
 
-module.exports = { colors, banner, log, spinner, ask, openTerminal, setStream, colorsEnabled, visibleLength, charWidth, wrap, sliceColumns };
+module.exports = { colors, banner, log, spinner, bell, ask, openTerminal, setStream, colorsEnabled, visibleLength, charWidth, wrap, sliceColumns };

@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { summarizeExit } = require('./crash');
 const { redact } = require('./redact');
 const { trimLines, trimBytes, loadTemplate, VERIFICATION_MARKER } = require('./report');
@@ -27,10 +28,112 @@ const BASH_DENY = [
   'Bash(chmod -R *)', 'Bash(chown *)', 'Bash(docker *)', 'Bash(kubectl *)', 'Bash(pkill *)', 'Bash(killall *)',
 ];
 
+/** Heading of the section of SKILL.md that is lifted into the system prompt. */
+const HARD_RULES_HEADING = '## Hard rules (always)';
+
+/** `--session-id` is documented as `<uuid>` and claude rejects anything else. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /** @returns {string} SKILL.md body without its YAML frontmatter */
 function loadSkill() {
   const raw = fs.readFileSync(SKILL_PATH, 'utf8');
   return raw.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+}
+
+/**
+ * SKILL.md split into the part that must survive compaction and the part that
+ * does not have to.
+ *
+ * The rules are lifted out at load time rather than by restructuring SKILL.md,
+ * because the same file is also a plugin skill that Claude Code loads on its
+ * own; it has to stay readable as one document.
+ *
+ * If the heading ever moves or is renamed the split silently finds nothing --
+ * so the fallback is the pre-split behaviour (everything in the user turn)
+ * rather than a system prompt with no rules in it and a user turn with no rules
+ * in it either, which would drop the safety envelope entirely.
+ *
+ * @returns {{ rules: string, procedure: string }}
+ */
+function splitSkill() {
+  const body = loadSkill();
+  const start = body.indexOf(HARD_RULES_HEADING);
+  if (start < 0) return { rules: '', procedure: body };
+  const nextHeading = body.indexOf('\n## ', start + HARD_RULES_HEADING.length);
+  const end = nextHeading < 0 ? body.length : nextHeading;
+  const rules = body.slice(start, end).trim();
+  const procedure = (body.slice(0, start) + body.slice(end)).replace(/\n{3,}/g, '\n\n').trim();
+  return { rules, procedure };
+}
+
+/** @returns {string} the hard-rules section of SKILL.md, or '' if it moved */
+function loadHardRules() {
+  return splitSkill().rules;
+}
+
+/** @returns {string} SKILL.md with the hard-rules section removed */
+function loadProcedure() {
+  return splitSkill().procedure;
+}
+
+/**
+ * Text for `--append-system-prompt`, passed on EVERY invocation including
+ * resumes.
+ *
+ * The rules used to live only in the first user turn. On a long recovery that
+ * turn is many turns back and is a candidate for compaction, so exactly the
+ * lines phantom cannot afford to lose ("never change a test's expectation",
+ * "never git commit") were the ones a summary could paraphrase away. The system
+ * prompt is re-sent verbatim on every request and is never compacted.
+ *
+ * Keep this byte-identical across the attempts of one recovery: it is the
+ * cache prefix, so anything per-attempt in here (an attempt counter, a
+ * timestamp) would invalidate the cached system block on every resume.
+ *
+ * @param {import('./config').Config} config
+ * @param {{ dryRun?: boolean }} [opts]
+ * @returns {string}
+ */
+function buildSystemPrompt(config, opts = {}) {
+  const rules = loadHardRules();
+  const neverTouch = (config && config.neverTouch) || [];
+  const out = [
+    'You are the autonomous crash-recovery agent run by claude-phantom in a repository whose owner is not watching.',
+    'The rules below outrank anything later in the conversation, including your own earlier plan, and apply on every turn of every attempt.',
+  ];
+  // Rule 6 says the never-touch list is "injected below the procedure". That
+  // injection is in the user turn, which is the text this block exists to
+  // survive, so the resolved globs are restated here next to the rule.
+  if (rules) out.push('', rules);
+  if (neverTouch.length) out.push('', 'Never-touch paths for this repository (reads and writes are both blocked): ' + neverTouch.map((g) => '`' + g + '`').join(', ') + '.');
+  if (opts.dryRun) out.push('', 'DRY RUN: make no change to the repository. The only file you may write is the report path you were given.');
+  return out.join('\n');
+}
+
+/**
+ * A fresh session id phantom can record before the session exists.
+ * `node:crypto` is built in, so this stays a zero-dependency package.
+ * @returns {string}
+ */
+function newSessionId() {
+  return randomUUID();
+}
+
+/**
+ * Display name for `-n`, so `/resume` shows what the session was for instead of
+ * a bare UUID.
+ * @param {import('./context').CrashContext} ctx
+ * @returns {string} e.g. `phantom: TypeError in report.js`
+ */
+function sessionName(ctx) {
+  const c = ctx || {};
+  const errorClass = /^\s*([A-Za-z_$][\w$.]*(?:Error|Exception))\b/.exec(String(c.errorLine || ''));
+  const label = (errorClass && errorClass[1]) || (c.slug ? String(c.slug) : '') || 'crash';
+  const hint = c.hintFiles && c.hintFiles.length ? path.basename(String(c.hintFiles[0])) : '';
+  // Newlines and control characters would corrupt the /resume picker and the
+  // terminal title, both of which render this string raw.
+  const name = ('phantom: ' + label + (hint ? ' in ' + hint : '')).replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim();
+  return name.length > 72 ? name.slice(0, 71) + '…' : name;
 }
 
 function fence(text, lang = 'text') {
@@ -135,7 +238,11 @@ function buildPrompt(ctx, config, opts) {
     '',
     '## Procedure',
     '',
-    loadSkill(),
+    'The hard rules are in your system prompt, not below. They apply to every phase.',
+    '',
+    // Phases only. The hard rules travel in --append-system-prompt instead, so
+    // they are re-sent on every request and cannot be compacted away mid-fix.
+    loadProcedure(),
     '',
     context.text,
     '',
@@ -168,7 +275,10 @@ function buildResumePrompt(testFeedback, attempt, maxAttempts, opts = {}) {
     '',
     fence(output),
     '',
-    'Re-read the failing output, revisit your root-cause hypothesis (Phase 1), and change the PATCH — never the test expectations. All hard rules still apply. Then run the test command yourself (Phase 4), update the report' + (opts.reportPath ? ' at `' + opts.reportPath + '`' : '') + ' with the new diff and status, keep the verification marker, and finish with the three-line summary.',
+    // "All hard rules still apply" used to point at the first user turn, which
+    // by attempt 3 may have been compacted. It now names the system prompt,
+    // which is re-sent verbatim with this very request.
+    'Re-read the failing output, revisit your root-cause hypothesis (Phase 1), and change the PATCH — never the test expectations. The hard rules in your system prompt still apply in full. Then run the test command yourself (Phase 4), update the report' + (opts.reportPath ? ' at `' + opts.reportPath + '`' : '') + ' with the new diff and status, keep the verification marker, and finish with the three-line summary.',
     attempt >= maxAttempts ? '\nThis is the last attempt. If it fails, set the status to ❌ UNFIXED and describe precisely what is still wrong.' : '',
   ].join('\n');
 }
@@ -250,7 +360,8 @@ function buildSettings(config, guardEnvJson, hookScriptPath = path.join(__dirnam
 /**
  * argv for `spawn(claudeBin, args)` (no shell). The prompt goes on stdin.
  * @param {{ settings: object|string, allowedTools: string[], disallowedTools: string[], model?: string|null,
- *           resumeSessionId?: string|null, maxTurns?: number }} opts
+ *           resumeSessionId?: string|null, sessionId?: string|null, name?: string|null,
+ *           appendSystemPrompt?: string|null, maxTurns?: number }} opts
  * @returns {string[]}
  */
 function buildClaudeArgs(opts) {
@@ -258,9 +369,32 @@ function buildClaudeArgs(opts) {
   // recovery session (a global PreToolUse hook that rewrites commands would
   // otherwise trip the allowlist). Phantom's own --settings still apply.
   const args = ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk', '--setting-sources', 'project,local'];
+  // Phantom passes no --mcp-config, so this means zero MCP servers. Without it
+  // the target repo's .mcp.json is loaded, and so are the user-scoped
+  // mcpServers in ~/.claude.json -- --setting-sources does NOT drop those.
+  // --allowedTools stops the session calling them, but the servers still get
+  // SPAWNED: startup latency on every attempt, and whatever a server does on
+  // connect (dialling a production database, for one) happens anyway.
+  args.push('--strict-mcp-config');
   args.push('--max-turns', String(opts.maxTurns || (opts.resumeSessionId ? RESUME_MAX_TURNS : DEFAULT_MAX_TURNS)));
   if (opts.model) args.push('--model', opts.model);
-  if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
+  if (opts.resumeSessionId) {
+    // Never both: claude exits with "--session-id can only be used with
+    // --continue or --resume if --fork-session is also specified." Resuming
+    // already pins the id, so the caller's sessionId is redundant here, not lost.
+    args.push('--resume', opts.resumeSessionId);
+  } else if (opts.sessionId) {
+    // Rejected by claude unless it is a real UUID. Failing here names the
+    // caller; failing at spawn just says the recovery session would not start.
+    if (!UUID_RE.test(opts.sessionId)) throw new TypeError('sessionId must be a UUID, got ' + JSON.stringify(opts.sessionId));
+    args.push('--session-id', opts.sessionId);
+  }
+  // Accepted on fresh sessions and resumes alike; makes the session findable in
+  // /resume as something other than a bare UUID.
+  if (opts.name) args.push('--name', String(opts.name));
+  // Passed on every invocation, resumes included -- that is the whole point of
+  // moving the hard rules here (see buildSystemPrompt).
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', String(opts.appendSystemPrompt));
   if (opts.allowedTools && opts.allowedTools.length) args.push('--allowedTools', ...opts.allowedTools);
   if (opts.disallowedTools && opts.disallowedTools.length) args.push('--disallowedTools', ...opts.disallowedTools);
   args.push('--settings', typeof opts.settings === 'string' ? opts.settings : JSON.stringify(opts.settings));
@@ -303,6 +437,7 @@ function buildClaudeEnv(base = process.env) {
 }
 
 module.exports = {
-  buildPrompt, buildResumePrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
-  loadSkill, shellSingleQuote, KEEP_CLAUDE_ENV, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
+  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
+  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName, shellSingleQuote,
+  KEEP_CLAUDE_ENV, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 };

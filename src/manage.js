@@ -523,8 +523,57 @@ function table(rows, paints = [], indent = '  ') {
   }).join('  ').replace(/\s+$/, ''));
 }
 
-function section(title, count, extra) {
-  return colors.bold(title) + ' ' + colors.dim('(' + count + (extra ? ' · ' + extra : '') + ')');
+function section(paint, title, count, extra) {
+  return paint.bold(title) + ' ' + paint.dim('(' + count + (extra ? ' · ' + extra : '') + ')');
+}
+
+/**
+ * Painters that paint nothing, for the piped view.
+ *
+ * ui.colors already no-ops when colour is off, but it decides that from *ui's*
+ * stream, which is not necessarily the stream `ls` was told to write to -- and
+ * FORCE_COLOR turns it on unconditionally. A pipe must never receive an escape
+ * sequence it did not ask for, so the piped view stops asking for colour at all
+ * rather than hoping the global answer happens to be "no".
+ */
+const PLAIN = ['bold', 'dim', 'red', 'green', 'yellow', 'cyan', 'magenta']
+  .reduce((o, k) => { o[k] = (s) => String(s); return o; }, {});
+
+/**
+ * Is this destination a terminal?
+ *
+ * `phantom ls > history.txt` and `phantom ls | grep phantom/fix-` used to get
+ * the same view a human gets: subjects and crash commands cut to 60/64 columns
+ * with an ellipsis, and every column padded out with spaces. Both are lossy in a
+ * way the reader cannot detect -- the elided half of a branch name is simply
+ * gone from the file, and `awk '{print $2}'` cannot split on padding made of the
+ * same spaces the values contain. So: pretty and truncated for a terminal,
+ * complete and tab-separated for anything else.
+ *
+ * `pretty` is the injectable override; without it the decision follows the
+ * stream the caller passed, never process.stdout/stderr behind its back, so a
+ * test never depends on whether the developer ran it from a terminal.
+ */
+function isPretty(opts) {
+  if (opts.pretty !== undefined) return Boolean(opts.pretty);
+  const stream = opts.stream || process.stderr;
+  return Boolean(stream && stream.isTTY);
+}
+
+/**
+ * One TSV field.
+ *
+ * Tab and newline ARE the structure in this mode, so a value containing one
+ * would silently invent a column or a row: git happily takes a commit subject
+ * with a literal tab in it, and an errorLine is a slice of a program's own
+ * output. They collapse to a space; nothing else is touched, because the point
+ * of this mode is that the value arrives whole.
+ */
+const field = (v) => (v === null || v === undefined ? '' : String(v)).replace(/[\t\r\n]+/g, ' ');
+
+/** Pretty: aligned columns. Piped: the same cells, tab-separated and unpadded. */
+function rowsOf(pretty, rows, paints) {
+  return pretty ? table(rows, paints) : rows.map((row) => row.map(field).join('\t'));
 }
 
 function limited(items, limit) {
@@ -534,73 +583,90 @@ function limited(items, limit) {
 
 /**
  * The `phantom ls` view: newest first, one line each, columns that line up.
+ *
+ * Two shapes, chosen by isPretty(): the aligned one above for a terminal, and
+ * for a pipe or a file the same rows carrying MORE than the terminal gets --
+ * untruncated text, the full ISO timestamp instead of a local wall-clock
+ * minute, raw byte counts instead of "4.1 KB", the repo-relative path of each
+ * file, and a leading kind column so a grep hit says what it is.
+ *
  * @param {object} state
- * @param {{ limit?: number|null, now?: number }} [opts]
+ * @param {{ limit?: number|null, now?: number, stream?: NodeJS.WritableStream, pretty?: boolean }} [opts]
  * @returns {string}
  */
 function renderState(state, opts = {}) {
   const now = opts.now === undefined ? Date.now() : opts.now;
   const limit = opts.limit === undefined ? 10 : opts.limit;
+  const pretty = isPretty(opts);
+  const c = pretty ? colors : PLAIN;
   const out = [];
   const where = state.currentBranch ? ' (on ' + state.currentBranch + ')' : ' (detached HEAD)';
-  out.push(colors.bold('👻 phantom history') + ' ' + colors.dim(state.root + where));
+  out.push(c.bold('👻 phantom history') + ' ' + c.dim(state.root + where));
   out.push('');
 
-  out.push(section('fix branches', state.branches.length));
+  out.push(section(c, 'fix branches', state.branches.length));
   if (!state.branches.length) {
-    out.push(colors.dim('  none'));
+    out.push(c.dim('  none'));
   } else {
     const { shown, hidden } = limited(state.branches, limit);
-    out.push(...table(shown.map((b) => [
+    const status = (b) => (b.current ? 'current' : b.merged ? 'merged' : 'unmerged');
+    out.push(...rowsOf(pretty, shown.map((b) => (pretty ? [
       b.name,
       timeAgo(b.at, now),
-      b.current ? 'current' : b.merged ? 'merged' : 'unmerged',
+      status(b),
       truncate(b.subject || '(no commits of its own)', 60),
-    ]), [
+    ] : [
+      'branch', b.name, b.at, timeAgo(b.at, now), status(b), b.subject,
+    ])), [
       (cell, row) => (row[2] === 'unmerged' ? colors.yellow(cell) : cell),
       colors.dim,
       (cell, row) => (row[2] === 'unmerged' ? colors.yellow(cell) : row[2] === 'current' ? colors.cyan(cell) : colors.green(cell)),
       colors.dim,
     ]));
-    if (hidden) out.push(colors.dim('  … ' + hidden + ' more'));
+    if (hidden) out.push(c.dim('  … ' + hidden + ' more'));
   }
   out.push('');
 
-  out.push(section('crash captures', state.crashes.length, formatBytes(state.totals.crashBytes)));
+  out.push(section(c, 'crash captures', state.crashes.length, formatBytes(state.totals.crashBytes)));
   if (!state.crashes.length) {
-    out.push(colors.dim('  none'));
+    out.push(c.dim('  none'));
   } else {
     const { shown, hidden } = limited(state.crashes, limit);
-    out.push(...table(shown.map((c) => [
-      formatWhen(c.at),
-      timeAgo(c.at, now),
-      formatBytes(c.bytes),
-      truncate(describeCrash(c), 64),
-    ]), [null, colors.dim, colors.dim, colors.dim]));
-    if (hidden) out.push(colors.dim('  … ' + hidden + ' more'));
+    out.push(...rowsOf(pretty, shown.map((x) => (pretty ? [
+      formatWhen(x.at),
+      timeAgo(x.at, now),
+      formatBytes(x.bytes),
+      truncate(describeCrash(x), 64),
+    ] : [
+      'crash', x.rel, x.at, timeAgo(x.at, now), x.bytes, describeCrash(x),
+    ])), [null, colors.dim, colors.dim, colors.dim]));
+    if (hidden) out.push(c.dim('  … ' + hidden + ' more'));
   }
   out.push('');
 
-  out.push(section('post-mortems', state.reports.length, formatBytes(state.totals.reportBytes)));
+  out.push(section(c, 'post-mortems', state.reports.length, formatBytes(state.totals.reportBytes)));
   if (!state.reports.length) {
-    out.push(colors.dim('  none'));
+    out.push(c.dim('  none'));
   } else {
     const { shown, hidden } = limited(state.reports, limit);
-    out.push(...table(shown.map((r) => [
+    const title = (r) => (r.detail && r.detail.title) || r.slug;
+    out.push(...rowsOf(pretty, shown.map((r) => (pretty ? [
       formatWhen(r.at),
       timeAgo(r.at, now),
       formatBytes(r.bytes),
-      truncate((r.detail && r.detail.title) || r.slug, 64),
-    ]), [null, colors.dim, colors.dim, colors.dim]));
-    if (hidden) out.push(colors.dim('  … ' + hidden + ' more'));
+      truncate(title(r), 64),
+    ] : [
+      'report', r.rel, r.at, timeAgo(r.at, now), r.bytes, title(r),
+    ])), [null, colors.dim, colors.dim, colors.dim]));
+    if (hidden) out.push(c.dim('  … ' + hidden + ' more'));
   }
   out.push('');
 
   const merged = state.branches.filter((b) => b.merged && !b.current).length;
-  out.push(colors.dim(state.keepReports > 0
+  out.push(c.dim(state.keepReports > 0
     ? 'keepReports=' + state.keepReports + ' prunes crash captures and post-mortems automatically; branches are never pruned.'
     : 'keepReports=0: nothing is pruned automatically.'));
-  if (merged) out.push(colors.dim('phantom clean --merged would delete ' + merged + ' merged fix branch(es).'));
+  if (merged) out.push(c.dim('phantom clean --merged would delete ' + merged + ' merged fix branch(es).'));
   return out.join('\n') + '\n';
 }
 
@@ -615,30 +681,45 @@ function describeCrash(c) {
 /**
  * What a clean would do, item by item. Printed before the confirmation, so it
  * has to be complete: no "… 12 more" on the list of things about to be deleted.
+ *
+ * Degrades the same way `ls` does, and for the same reason: this is the record
+ * a user keeps of what a `--yes` run was about to destroy, and `phantom clean
+ * --dry-run > plan.txt` must not hand them a padded, elided copy of it.
+ *
+ * @param {object} plan
+ * @param {{ now?: number, stream?: NodeJS.WritableStream, pretty?: boolean }} [opts]
  * @returns {string}
  */
 function renderPlan(plan, opts = {}) {
   const now = opts.now === undefined ? Date.now() : opts.now;
+  const pretty = isPretty(opts);
+  const c = pretty ? colors : PLAIN;
   const out = [];
-  for (const reason of plan.reasons) out.push(colors.dim('· ' + reason));
+  for (const reason of plan.reasons) out.push(c.dim('· ' + reason));
   out.push('');
   if (!plan.deletions.length) {
-    out.push(colors.dim('nothing to delete.'));
+    out.push(c.dim('nothing to delete.'));
     return out.join('\n') + '\n';
   }
-  out.push(colors.bold('would delete:'));
-  out.push(...table(plan.deletions.map((d) => [
-    d.kind === 'branch' ? 'branch' : d.kind,
+  out.push(c.bold('would delete:'));
+  out.push(...rowsOf(pretty, plan.deletions.map((d) => (pretty ? [
+    d.kind,
     d.kind === 'branch' ? d.name : d.rel,
     timeAgo(d.at, now),
     d.kind === 'branch' ? (d.merged ? 'merged' : colors.yellow('UNMERGED')) : formatBytes(d.bytes),
-  ]), [colors.dim, null, colors.dim, colors.dim]));
+  ] : [
+    d.kind,
+    d.kind === 'branch' ? d.name : d.rel,
+    d.at,
+    timeAgo(d.at, now),
+    d.kind === 'branch' ? (d.merged ? 'merged' : 'UNMERGED') : d.bytes,
+  ])), [colors.dim, null, colors.dim, colors.dim]));
   out.push('');
-  const c = plan.counts;
-  out.push(colors.bold(c.branches + ' branch(es), ' + c.crashes + ' crash capture(s), ' + c.reports + ' post-mortem(s)')
-    + colors.dim(c.bytes ? ' · ' + formatBytes(c.bytes) + ' on disk' : ''));
+  const counts = plan.counts;
+  out.push(c.bold(counts.branches + ' branch(es), ' + counts.crashes + ' crash capture(s), ' + counts.reports + ' post-mortem(s)')
+    + c.dim(counts.bytes ? ' · ' + formatBytes(counts.bytes) + ' on disk' : ''));
   if (plan.unmergedSelected) {
-    out.push(colors.yellow('⚠ ' + plan.unmergedSelected + ' of these branches are NOT merged: their commits will only be reachable via the reflog.'));
+    out.push(c.yellow('⚠ ' + plan.unmergedSelected + ' of these branches are NOT merged: their commits will only be reachable via the reflog.'));
   }
   return out.join('\n') + '\n';
 }
@@ -661,7 +742,7 @@ function parseNumber(flag, raw) {
  */
 function parseManageArgs(name, argv) {
   const flags = {
-    help: false, all: false, limit: undefined, dryRun: false, yes: false,
+    help: false, all: false, limit: undefined, dryRun: false, yes: false, json: false,
     merged: false, unmerged: false, olderThanDays: null, branches: undefined, files: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -680,6 +761,13 @@ function parseManageArgs(name, argv) {
       case '--all': flags.all = true; break;
       case '--dry-run': flags.dryRun = true; break;
       case '--yes': case '-y': flags.yes = true; break;
+      // Only `ls` has a machine-readable form. Accepting the flag on `clean` and
+      // ignoring it would be worse than refusing it: a script that asked for
+      // parseable output and got a prose plan would go on to delete things.
+      case '--json':
+        if (name !== 'ls') throw new ManageUsageError('unknown option --json (see phantom ' + name + ' --help)');
+        flags.json = true;
+        break;
       case '--merged': flags.merged = true; break;
       case '--unmerged': flags.unmerged = true; break;
       case '--older-than': flags.olderThanDays = parseNumber(key, value()); break;
@@ -696,13 +784,20 @@ function parseManageArgs(name, argv) {
 
 function lsHelp() {
   return [
-    'Usage: phantom ls [--all] [--limit <n>]',
+    'Usage: phantom ls [--all] [--limit <n>] [--json]',
     '',
     "Lists this repo's phantom history, newest first: phantom/fix-* branches (with",
     'whether each is merged into the branch you are on), crash captures and post-mortems.',
     '',
     '  --all         show every entry instead of the newest 10 per section',
     '  --limit <n>   show n entries per section',
+    '  --json        print the whole state as one line of JSON on stdout, and nothing',
+    '                on stderr. Always complete: --all and --limit do not apply.',
+    '',
+    'Written to a terminal the columns are aligned and long values are cut to fit.',
+    'Piped or redirected, rows become full, untruncated, tab-separated values --',
+    'kind, name or path, ISO timestamp, age, status, and text -- so that grep, cut',
+    'and awk see everything the terminal had to shorten.',
     '',
     'To wrap the real `ls` command instead, use: phantom -- ls',
   ].join('\n');
@@ -756,7 +851,7 @@ function repoRoot(cwd) {
 
 /**
  * @param {string[]} argv arguments after the subcommand
- * @param {{ cwd?: string, out?: NodeJS.WritableStream, now?: number }} [io]
+ * @param {{ cwd?: string, out?: NodeJS.WritableStream, jsonOut?: NodeJS.WritableStream, now?: number }} [io]
  * @returns {Promise<number>} exit code
  */
 async function runList(argv = [], io = {}) {
@@ -775,8 +870,23 @@ async function runList(argv = [], io = {}) {
   if (!root) return 2;
   const config = configFor(cwd);
   const state = listPhantomState(root, { now: io.now, reportDir: config.reportDir, keepReports: config.keepReports });
+  if (flags.json) {
+    // The one thing phantom prints on stdout. Everything a HUMAN reads goes to
+    // stderr because stdout belongs to the wrapped command -- but `ls` wraps
+    // nothing, and `phantom ls --json | jq` is the whole point of the flag; a
+    // consumer that has to filter phantom's log lines out of the JSON it asked
+    // for is not machine-readable at all. bin/phantom-status.js already writes
+    // its segment to stdout on the same reasoning.
+    //
+    // One line, not indented, whatever is on the other end: --json is already
+    // the machine mode, so making its bytes depend on isatty() would be the
+    // surprise this whole change exists to remove. `| jq` indents on request.
+    (io.jsonOut || process.stdout).write(JSON.stringify(state) + '\n');
+    return 0;
+  }
+  // --limit and --all are human affordances; JSON above is deliberately whole.
   const limit = flags.all ? null : (flags.limit === undefined ? 10 : flags.limit);
-  out.write(renderState(state, { limit, now: io.now }));
+  out.write(renderState(state, { limit, now: io.now, stream: out }));
   return 0;
 }
 
@@ -817,7 +927,7 @@ async function runClean(argv = [], io = {}) {
     branches: flags.branches,
     files: flags.files,
   });
-  out.write(renderPlan(plan, { now: io.now }));
+  out.write(renderPlan(plan, { now: io.now, stream: out }));
   if (!plan.deletions.length) return 0;
   if (flags.dryRun) {
     log.info('dry run: nothing was deleted');

@@ -309,6 +309,21 @@ function subcommandHelp(name) {
   ].join('\n');
 }
 
+/**
+ * The command that clears this refusal.
+ *
+ * Rust's panic handler prints the literal `RUST_BACKTRACE=1` at the point of
+ * failure rather than describing it, and phantom already does this well
+ * elsewhere -- doctor's indented fix lines, the full-sha stash command. These
+ * three messages named the problem and left the user to work out the cure.
+ */
+function retryHint(refusal) {
+  if (/uncommitted changes/.test(refusal)) return 'commit or stash, then: phantom recover';
+  if (/not a git repository/.test(refusal)) return 'phantom only recovers inside git repos: git init && git commit';
+  if (/nothing to diagnose/.test(refusal)) return "give it something to verify against: phantom --test '<your test command>' <cmd>, or diagnose only with phantom --dry-run <cmd>";
+  return 'once that is resolved: phantom recover';
+}
+
 function describeCommand(command, args) {
   return [command, ...args].join(' ');
 }
@@ -426,6 +441,17 @@ async function main(argv = process.argv.slice(2), io = {}) {
   // for a fix branch that was never created.
   if (refusal) {
     log.warn(describeCommand(command, args) + ' crashed (' + summarizeExit(result) + '); phantom is not recovering: ' + refusal);
+    // Save the crash even though we are declining to act on it, so `phantom
+    // recover` can do the two things its help text promises. Without this, the
+    // context for a flaky crash is gone the moment the user commits.
+    // The injected recovery seam only has to provide runRecovery -- tests stub
+    // it with exactly that -- so fall through to the real module for capture.
+    const rec = io.recovery && io.recovery.captureCrash ? io.recovery : require('./recovery');
+    const saved = ctx.git ? rec.captureCrash(ctx, config) : null;
+    if (saved) {
+      log.warn('crash saved to ' + path.relative(cwd, saved).replace(/\\/g, '/'));
+      log.warn('  ' + retryHint(refusal));
+    }
     return childExit;
   }
   if (ctx.git) await announce.announceCrash(ctx, config, ctx.git.root);

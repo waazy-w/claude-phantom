@@ -222,6 +222,68 @@ function uniqueStamp(dir, ts, slug) {
   return name;
 }
 
+/**
+ * The newest line of the guard hook's progress trail, as a human phrase.
+ *
+ * Reads only the tail: the file is small (every field is clipped at the writing
+ * end) but this runs twice a second, and a partial last line is normal because
+ * the writer appends while we read -- so a line that will not parse is skipped
+ * rather than treated as an error.
+ * @returns {string|null}
+ */
+function lastProgress(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null; // absent until the session's first tool call
+  }
+  const lines = raw.split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const ev = JSON.parse(lines[i]);
+      if (!ev || !ev.tool) continue;
+      const verb = { Read: 'reading', Edit: 'editing', Write: 'writing', MultiEdit: 'editing',
+        NotebookEdit: 'editing', Grep: 'searching', Glob: 'looking for', Bash: 'running' }[ev.tool] || ev.tool;
+      return ev.what ? verb + ' ' + ev.what : verb;
+    } catch { /* a half-written tail line; try the one before it */ }
+  }
+  return null;
+}
+
+/**
+ * Write the crash capture, and only that.
+ *
+ * `phantom recover --help` says it is "for retrying a recovery that was refused
+ * because the tree was dirty or claude was missing" -- and neither case could
+ * be recovered, because the capture was written in step 2 of runRecovery, below
+ * both of those checks. After a dirty-tree refusal there was no `.phantom/` at
+ * all and `recover --list` said nothing had ever been saved. For a flaky crash
+ * that context is simply gone and the user has to reproduce it.
+ *
+ * Deliberately does NOT announce: `announceCrash` fires in cli.js, and a
+ * refusal must not leave an open crash event or the status line claims to be
+ * fixing something phantom declined to touch.
+ *
+ * @returns {string|null} the capture path, or null if it could not be written
+ */
+function captureCrash(ctx, config) {
+  const root = ctx && ctx.git && ctx.git.root;
+  if (!root) return null;
+  try {
+    const reportDirAbs = path.resolve(root, config.reportDir);
+    const crashDir = path.resolve(reportDirAbs, '..', 'crashes');
+    ensureExcluded(root, phantomDirOf(config.reportDir));
+    fs.mkdirSync(crashDir, { recursive: true });
+    const stamp = uniqueStamp(crashDir, timestamp(), ctx.slug);
+    const file = path.join(crashDir, stamp + '.json');
+    fs.writeFileSync(file, JSON.stringify(ctx, null, 2));
+    return file;
+  } catch {
+    return null;
+  }
+}
+
 function phantomDirOf(reportDir) {
   const norm = reportDir.replace(/\\/g, '/').replace(/^\.\//, '');
   return norm.split('/')[0] || '.phantom';
@@ -310,7 +372,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const baseEnv = hooks.env || process.env;
   const deadline = t0 + (Number(config.maxMinutes) || 15) * 60 * 1000;
   const s = {
-    root: null, origRef: null, branch: null, baseSha: null, onPhantomBranch: false, stashed: false, child: null,
+    root: null, origRef: null, branch: null, baseSha: null, onPhantomBranch: false, stashed: false, child: null, announced: false,
     reportPath: null, aborted: false, cleanupPromise: null, signalHandlers: [], stayed: false, done: false, sessionId: null,
     // The stash is tracked by commit sha and label, never by stack position:
     // `git stash pop` with no argument pops whatever landed on top, which may
@@ -325,6 +387,28 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message, sessionId: s.sessionId || null });
 
   /**
+   * Close the crash event, exactly once, whatever happened.
+   *
+   * `announceCrash` fires in cli.js before this function is called, and
+   * `announceRecovery` used to fire only on the happy path -- so every early
+   * return (no claude, dirty tree, stash failed, no commits, branch failed),
+   * every abort, and the catch block left the crash event open. Nothing closes
+   * it later, so `phantom-status` showed "fixing …" for its full 20-minute
+   * window and the plugin briefed Claude to go find a fix branch that was never
+   * created. With --notify you got the opening notification and waited for a
+   * closing one that could not come.
+   *
+   * An announce is best-effort and must never change the outcome, so it is
+   * wrapped; and it is guarded, because the happy path already announces.
+   */
+  const closeEvent = async (final) => {
+    if (s.announced || !s.root) return final;
+    s.announced = true;
+    try { await announce.announceRecovery(ctx, config, final, s.root); } catch { /* best-effort */ }
+    return final;
+  };
+
+  /**
    * Give up *after* the stash was taken.
    *
    * `return result(...)` returns straight out of the try block without running
@@ -336,6 +420,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const bail = async (status, message) => {
     log.error(message);
     await cleanup('could not continue');
+    await closeEvent(result(status, message));
     // Marked as already told to the user, so the CLI does not print the same
     // sentence a second time underneath it.
     return { ...result(status, message), reported: true };
@@ -443,22 +528,26 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     // From here on every exit path goes through cleanup(): the stash taken
     // below and the branch created in step 3 must never be orphaned by Ctrl+C.
     installSignalHandlers();
-    const bin = resolveClaudeBin(config.claudeBin || 'claude');
-    if (!bin.ok) return result('error', 'claude CLI unavailable (' + bin.error + '); ' + INSTALL_HINT);
-    log.verbose('claude: ' + bin.version);
-    s.origRef = ctx.git.detached ? ctx.git.headSha : ctx.git.branch;
+    // Excluded BEFORE anything writes into it. closeEvent() appends an event on
+    // the early-exit paths -- including this one -- and until .phantom/ is in
+    // .git/info/exclude that append makes the user's tree dirty, which then
+    // makes the NEXT run refuse. Cheap, idempotent, and it belongs first.
     const phantomDir = phantomDirOf(config.reportDir);
     ensureExcluded(s.root, phantomDir);
+    const bin = resolveClaudeBin(config.claudeBin || 'claude');
+    if (!bin.ok) return await closeEvent(result('error', 'claude CLI unavailable (' + bin.error + '); ' + INSTALL_HINT));
+    log.verbose('claude: ' + bin.version);
+    s.origRef = ctx.git.detached ? ctx.git.headSha : ctx.git.branch;
     let restoreHint = null;
     if (git.isDirty(opts)) {
       if (dryRun) {
         log.info('working tree is dirty; dry run reads it as-is');
       } else if (!flags.allowDirty) {
-        return result('refused', 'working tree has uncommitted changes; commit/stash them or re-run with --allow-dirty');
+        return await closeEvent(result('refused', 'working tree has uncommitted changes; commit/stash them or re-run with --allow-dirty'));
       } else {
         const label = 'phantom-snapshot-' + timestamp();
         const ref = git.stashPush(label, opts);
-        if (!ref) return result('error', 'could not stash the dirty tree');
+        if (!ref) return await closeEvent(result('error', 'could not stash the dirty tree'));
         s.stashed = true;
         s.stashRef = ref;
         s.stashLabel = label;
@@ -507,7 +596,13 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const dirtyBefore = dryRun ? new Set(git.changedFilesSince(s.baseSha, opts)) : null;
     let testCommand = resolveTestCommand(s.root, config, ctx);
     const maxAttempts = Math.max(1, Number(config.maxIterations) || 1);
-    const guard = { neverTouch: config.neverTouch, cwd: s.root, dryRun, testCommand, reportPath: s.reportPath };
+    // The guard hook is a PreToolUse hook on every file and Bash tool, so it is
+    // already told what the session is doing -- it just discarded it. Handing it
+    // a path turns those calls into a trail the spinner can read, which is the
+    // difference between a bare clock and knowing the session is alive.
+    const progressPath = path.join(reportDirAbs, '.progress.jsonl');
+    try { fs.rmSync(progressPath, { force: true }); } catch { /* first run */ }
+    const guard = { neverTouch: config.neverTouch, cwd: s.root, dryRun, testCommand, reportPath: s.reportPath, progressPath };
     const guardJson = JSON.stringify(guard);
     // Windows cannot carry the payload in an env prefix, so it goes in a file
     // beside the reports (already git-excluded). Written only where it is used,
@@ -521,6 +616,15 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const allowedTools = prompt.buildAllowedTools(config, { dryRun, testCommand });
     const disallowedTools = prompt.buildDisallowedTools();
     const env = prompt.buildClaudeEnv(baseEnv);
+    // Generated up front, so phantom knows the id BEFORE the session runs rather
+    // than only after its result JSON parses -- it survives a SIGKILL now, and
+    // `-n` makes the session findable in /resume instead of a bare UUID.
+    const plannedSessionId = prompt.newSessionId();
+    const sessionLabel = prompt.sessionName(ctx);
+    // Built once, outside the loop: it is a stable cache prefix, and anything
+    // per-attempt in here would destroy that.
+    const systemPrompt = prompt.buildSystemPrompt(config, { dryRun });
+    s.sessionId = plannedSessionId;
     let sessionId = null;
     let lastClaude = null;
     let lastTest = null;
@@ -553,16 +657,33 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       const text = resuming
         ? prompt.buildResumePrompt(lastTest, attempt, maxAttempts, { testCommand, reportPath: s.reportPath })
         : prompt.buildPrompt(ctx, config, { dryRun, reportPath: s.reportPath, attempt, maxAttempts, testCommand, branch: s.branch, baseSha: s.baseSha });
-      const args = prompt.buildClaudeArgs({ settings, allowedTools, disallowedTools, model: config.model, resumeSessionId: resuming ? sessionId : null });
+      // --session-id and --resume are mutually exclusive without --fork-session,
+      // and forking would mint a new id phantom has already recorded.
+      const args = prompt.buildClaudeArgs({
+        settings, allowedTools, disallowedTools, model: config.model,
+        resumeSessionId: resuming ? sessionId : null,
+        sessionId: resuming ? null : plannedSessionId,
+        name: sessionLabel,
+        appendSystemPrompt: systemPrompt,
+      });
       const run = runClaude({ bin: config.claudeBin || 'claude', args, prompt: text, cwd: s.root, env, timeoutMs: remaining, verbose: Boolean(flags.verbose) });
       s.child = run.child;
       // The session prints nothing for minutes at a time; without a ticking
       // clock there is no way to tell work from a hang. Suppressed under
       // --verbose, where the session streams to the same stderr.
-      const spin = ui.spinner(resuming ? 'claude is re-reading the failures' : 'claude is diagnosing and patching',
-        flags.verbose ? { enabled: false } : {});
+      const base = resuming ? 'claude is re-reading the failures' : 'claude is diagnosing and patching';
+      const spin = ui.spinner(base, flags.verbose ? { enabled: false } : {});
+      // Repaint the label from the guard hook's trail. Reading the tail of a
+      // small append-only file every 500ms is cheaper than any streaming
+      // protocol, and it degrades to today's bare clock whenever the file is
+      // absent -- which is exactly the win32-without-a-guard-file case.
+      const ticker = setInterval(() => {
+        const line = lastProgress(progressPath);
+        spin.update(line ? attempt + '/' + maxAttempts + ' · ' + line : base);
+      }, 500);
+      ticker.unref();
       let res;
-      try { res = await run; } finally { spin.stop(); }
+      try { res = await run; } finally { clearInterval(ticker); spin.stop(); }
       s.child = null;
       checkAborted();
       lastClaude = res.json;
@@ -630,6 +751,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let changedFiles = [];
     let violations = [];
     if (guardFilePath) { try { fs.unlinkSync(guardFilePath); } catch { /* already gone */ } }
+    try { fs.rmSync(progressPath, { force: true }); } catch { /* already gone */ }
     const snapDiff = audit.diffSnapshots(neverTouchBefore, audit.snapshotNeverTouch(s.root, config.neverTouch, { skipPrefixes: [phantomDir] }));
     // A tracked file that changed on disk is put back by the hard reset below,
     // so it is a violation but not a loss. Only a file git never knew about --
@@ -811,22 +933,25 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const final = result(status, message);
     // 10. Banner + webhook
     printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached, budget });
+    // A recovery runs long enough that you leave. Most terminals turn a BEL
+    // into a tab badge, which needs no daemon and no Homebrew.
+    ui.bell(durationMs);
     try {
       const r = await notify.sendWebhook(config.webhook, notify.buildPayload(ctx, final));
       if (!r.skipped) log.verbose('webhook ' + (r.ok ? 'delivered' : 'failed: ' + (r.error || r.status)));
     } catch { /* best-effort */ }
-    await announce.announceRecovery(ctx, config, final, s.root);
+    await closeEvent(final);
     // Asked last, so the webhook and the Claude Code briefing never wait on a human.
     await offerBranchDecision(final, { ctx, s, config, flags, opts });
     return final;
   } catch (err) {
     if (err instanceof AbortedError || s.aborted) {
       await cleanup('aborted');
-      return result('aborted', 'interrupted; working tree restored');
+      return await closeEvent(result('aborted', 'interrupted; working tree restored'));
     }
     log.error('unexpected error: ' + (err && err.stack ? err.stack : err));
     await cleanup('failed');
-    return result('error', 'internal error: ' + (err && err.message ? err.message : String(err)));
+    return await closeEvent(result('error', 'internal error: ' + (err && err.message ? err.message : String(err))));
   } finally {
     removeSignalHandlers();
   }
@@ -901,4 +1026,4 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, b
   if (restoreHint) log.warn('your stashed changes: ' + restoreHint);
 }
 
-module.exports = { runRecovery, pruneDir, uniqueStamp, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };
+module.exports = { runRecovery, pruneDir, uniqueStamp, captureCrash, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };

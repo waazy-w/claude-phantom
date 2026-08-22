@@ -5,8 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {
-  buildPrompt, buildResumePrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
-  loadSkill, CONTEXT_BYTE_BUDGET, PHANTOM_FILLS, SKILL_PATH, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
+  buildPrompt, buildResumePrompt, buildSystemPrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
+  loadSkill, loadHardRules, loadProcedure, newSessionId, sessionName,
+  CONTEXT_BYTE_BUDGET, PHANTOM_FILLS, SKILL_PATH, HARD_RULES_HEADING, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 } = require('../src/prompt');
 const { VERIFICATION_MARKER } = require('../src/report');
 
@@ -503,4 +504,115 @@ test('the recovery session does not inherit the parent session\'s own environmen
   const future = buildClaudeEnv({ ...parent, CLAUDE_CODE_SOMETHING_NEW: 'x', CLAUDE_NEW: 'y' });
   assert.equal(future.CLAUDE_CODE_SOMETHING_NEW, undefined);
   assert.equal(future.CLAUDE_NEW, undefined);
+});
+
+// --- Isolation and rule survival -------------------------------------------
+
+test('the skill splits into hard rules and phases with nothing lost', () => {
+  const rules = loadHardRules();
+  const procedure = loadProcedure();
+  assert.ok(rules.startsWith(HARD_RULES_HEADING), 'the rules section starts at its own heading');
+  assert.ok(rules.includes('NEVER run `git checkout`'), 'rule 1 is in the rules');
+  assert.ok(rules.includes('NEVER change a test’s expectation') || rules.includes("NEVER change a test's expectation"),
+    'the rule phantom least affords to lose is in the rules');
+  assert.ok(rules.includes('10. When a rule and the goal conflict'), 'the last rule is in, so the split does not stop early');
+  assert.ok(!rules.includes('## Phase 0'), 'the split stops at the next heading');
+
+  assert.ok(!procedure.includes(HARD_RULES_HEADING), 'the rules are gone from the procedure');
+  assert.ok(!procedure.includes('NEVER run `git checkout`'), 'and not duplicated into it');
+  assert.ok(procedure.includes('## Phase 0 - Orient') && procedure.includes('## Dry-run variant'), 'every phase survives');
+
+  // Nothing may fall down the gap between the two halves: a rule that is in
+  // neither is a rule the session never sees at all.
+  const whole = loadSkill();
+  for (const line of whole.split('\n').map((l) => l.trim()).filter(Boolean)) {
+    assert.ok(rules.includes(line) || procedure.includes(line), 'line lost by the split: ' + line);
+  }
+});
+
+test('buildSystemPrompt carries the rules, the never-touch list and nothing per-attempt', () => {
+  const sys = buildSystemPrompt(config);
+  assert.ok(sys.includes(HARD_RULES_HEADING));
+  assert.ok(sys.includes('NEVER run `git checkout`'));
+  assert.ok(sys.includes('`.env`') && sys.includes('`**/secrets/**`'), 'the resolved never-touch globs travel with rule 6');
+  assert.ok(/outrank/.test(sys), 'the precedence claim is explicit');
+  assert.ok(!sys.includes('DRY RUN'), 'a fix run is not told to make no changes');
+
+  // Byte-identical between attempts, or every resume re-pays for the system
+  // block instead of reading it from the prompt cache.
+  assert.equal(buildSystemPrompt(config), sys, 'stable across calls');
+
+  const dry = buildSystemPrompt(config, { dryRun: true });
+  assert.ok(dry.includes('DRY RUN: make no change'), 'dry run is stated where it cannot be compacted away');
+  assert.ok(dry.includes('NEVER run `git checkout`'), 'dry run still gets the rules');
+  assert.ok(buildSystemPrompt({ neverTouch: [] }).includes('NEVER run `git checkout`'), 'no never-touch list still yields rules');
+});
+
+test('the hard rules are no longer in the user turn that compaction can eat', () => {
+  const p = buildPrompt(ctx, config, opts);
+  assert.ok(!p.includes(HARD_RULES_HEADING), 'rules not restated in the first turn');
+  assert.ok(!p.includes('NEVER run `git checkout`'));
+  assert.ok(p.includes('## Phase 0 - Orient'), 'the phases still are');
+  assert.ok(p.includes('The hard rules are in your system prompt'), 'the turn says where they went');
+});
+
+test('buildResumePrompt points at the system prompt, not at a turn that may be gone', () => {
+  const p = buildResumePrompt('not ok 1 - sum', 2, 3, { testCommand: 'npm test' });
+  assert.ok(p.includes('hard rules in your system prompt'), 'the reminder names text that is re-sent with this request');
+  assert.ok(!/All hard rules still apply/.test(p), 'the dangling reference is gone');
+  assert.ok(p.includes('never the test expectations'), 'the rule that matters here is still stated verbatim');
+});
+
+test('buildClaudeArgs starts no MCP server at all', () => {
+  const args = buildClaudeArgs({ settings: {}, allowedTools: ['Read'], disallowedTools: [] });
+  assert.ok(args.includes('--strict-mcp-config'), 'without this the repo .mcp.json and user-scoped mcpServers are spawned');
+  assert.ok(!args.includes('--mcp-config'), 'and there is no config to take servers from, so the set is empty');
+});
+
+test('buildClaudeArgs pins a session id on a fresh run and never beside --resume', () => {
+  const id = '0af940cd-1de4-4fc3-8c09-09606e0779c6';
+  const fresh = buildClaudeArgs({ settings: {}, allowedTools: [], disallowedTools: [], sessionId: id });
+  assert.equal(fresh[fresh.indexOf('--session-id') + 1], id, 'phantom knows the id before the session runs');
+  assert.ok(!fresh.includes('--resume'));
+
+  // claude: "--session-id can only be used with --continue or --resume if
+  // --fork-session is also specified." Passing both is a hard startup error.
+  const resumed = buildClaudeArgs({ settings: {}, allowedTools: [], disallowedTools: [], sessionId: id, resumeSessionId: id });
+  assert.ok(resumed.includes('--resume') && resumed[resumed.indexOf('--resume') + 1] === id);
+  assert.ok(!resumed.includes('--session-id'), 'both flags together would refuse to start');
+  assert.ok(!resumed.includes('--fork-session'), 'and phantom must not fork: it would lose the id it recorded');
+
+  assert.throws(() => buildClaudeArgs({ settings: {}, sessionId: 'not-a-uuid' }), TypeError, 'claude rejects a non-UUID');
+  assert.ok(!buildClaudeArgs({ settings: {} }).includes('--session-id'), 'omitted when the caller passes none');
+});
+
+test('buildClaudeArgs carries the name and the appended system prompt on every invocation', () => {
+  const common = { settings: {}, allowedTools: [], disallowedTools: [], name: 'phantom: TypeError in report.js', appendSystemPrompt: 'RULES' };
+  for (const [label, extra] of [['fresh', {}], ['resumed', { resumeSessionId: 'abc-123' }]]) {
+    const args = buildClaudeArgs({ ...common, ...extra });
+    assert.equal(args[args.indexOf('--name') + 1], 'phantom: TypeError in report.js', label + ': named for /resume');
+    assert.equal(args[args.indexOf('--append-system-prompt') + 1], 'RULES', label + ': rules re-sent');
+  }
+  const bare = buildClaudeArgs({ settings: {} });
+  assert.ok(!bare.includes('--name') && !bare.includes('--append-system-prompt'), 'no empty flags when unset');
+});
+
+test('sessionName is a readable, bounded, single-line label', () => {
+  assert.equal(sessionName(ctx), 'phantom: TypeError in report.js');
+  assert.equal(sessionName({ errorLine: 'AssertionError [ERR_ASSERTION]: no', hintFiles: [] }), 'phantom: AssertionError');
+  assert.equal(sessionName({ errorLine: 'segmentation fault', slug: 'segfault' }), 'phantom: segfault');
+  assert.equal(sessionName({}), 'phantom: crash', 'always something to show in the picker');
+  assert.equal(sessionName({ errorLine: 'TypeError: x\nmore', hintFiles: ['a/b/c.js'] }), 'phantom: TypeError in c.js');
+  const long = sessionName({ errorLine: 'TypeError: x', hintFiles: ['deep/' + 'n'.repeat(200) + '.js'] });
+  assert.ok(long.length <= 72, 'bounded: ' + long.length);
+  assert.ok(!/[\n\r\t]/.test(sessionName({ errorLine: 'TypeError: x', hintFiles: ['a\nb.js'] })), 'no control characters');
+});
+
+test('newSessionId returns distinct UUIDs in the shape claude requires', () => {
+  const a = newSessionId();
+  const b = newSessionId();
+  assert.notEqual(a, b);
+  for (const id of [a, b]) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // The generated id must survive its own validator, or a real recovery throws.
+  assert.equal(buildClaudeArgs({ settings: {}, sessionId: a })[buildClaudeArgs({ settings: {}, sessionId: a }).indexOf('--session-id') + 1], a);
 });

@@ -5,9 +5,13 @@
  * PreToolUse guard for phantom's headless recovery session. Reads the hook
  * event on stdin and its config as JSON -- from the file named in argv[2] when
  * one is given, otherwise from `PHANTOM_GUARD` in the environment:
- *   { neverTouch: string[], cwd: string, dryRun: boolean, testCommand: string|null, reportPath: string|null }
+ *   { neverTouch: string[], cwd: string, dryRun: boolean, testCommand: string|null,
+ *     reportPath: string|null, progressPath?: string }
  * Exit 2 + one-line stderr reason blocks the tool call. Fails closed: any
- * unparsable input is a block.
+ * unparsable input is a block. When `progressPath` is set it also appends one
+ * JSON line per tool call there, so the parent process can show the user what
+ * the session is doing (see recordProgress); that is a side effect only and
+ * never changes the verdict.
  *
  * Scope, honestly stated: this is a lexical guard over a shell string. It
  * catches direct and lightly-obfuscated commands (quotes, `bash -c`,
@@ -523,6 +527,78 @@ function readsOutsideRepo(command, cwd) {
   return null;
 }
 
+/** Longest `what` we write. Long enough to recognise a command, short enough for one terminal line beside a spinner. */
+const PROGRESS_CLIP = 60;
+
+function clipProgress(s) {
+  return s.length > PROGRESS_CLIP ? s.slice(0, PROGRESS_CLIP - 1) + '…' : s;
+}
+
+/**
+ * The short human string for one tool call.
+ *
+ * Redaction runs BEFORE the clip, never after. Clipping first cuts a secret in
+ * half, and the half that survives is its front -- a fragment that no redact
+ * pattern matches any more, printed to a terminal the user may well be sharing.
+ * If redact.js cannot be loaded at all the command is dropped rather than
+ * written raw, for the same reason: this file exists to be looked at.
+ */
+function progressWhat(tool, input, guard) {
+  if (tool === 'Bash') {
+    const command = String(input.command || '');
+    if (!command) return '';
+    try {
+      return clipProgress(require('./redact').redact(command).text);
+    } catch {
+      return '(command)';
+    }
+  }
+  const target = input.file_path || input.notebook_path || input.path;
+  if (target) return clipProgress(pathViews(guard.cwd, target)[0].rel || String(target));
+  // Grep/Glob without a path still walk somewhere; the pattern is the only
+  // thing that says what the session is looking for.
+  return clipProgress(String(input.pattern || ''));
+}
+
+/**
+ * Append one line describing this tool call to `guard.progressPath`.
+ *
+ * A recovery runs for up to fifteen minutes behind a single spinner line. This
+ * hook already computes, for every tool call, the repo-relative path or the
+ * command -- and then throws it away. Writing it to a file the parent process
+ * can tail is the whole feature: no new inspection, just not discarding what is
+ * already known. Absent `progressPath`, nothing happens at all.
+ *
+ * This is a side effect and nothing else, and it runs on EVERY tool call of a
+ * PreToolUse hook, where a thrown exception is a non-zero exit (a denied tool
+ * call the guard never intended) and a slow write is a stalled session. So it
+ * is exactly one `appendFileSync` -- a single open/write/close, well under a
+ * millisecond, orders of magnitude under the hook timeout -- inside a catch
+ * that swallows everything, including an unwritable or missing directory. Sync
+ * is deliberate: an async write would have to be awaited before exit, which
+ * would put the progress file on the critical path of the verdict.
+ *
+ * Append mode also means two hook processes running concurrently cannot
+ * interleave half-lines: each record is a few dozen bytes and lands in one
+ * write at a kernel-chosen offset.
+ *
+ * No size bound, deliberately. Every `what` is clipped, so a line is ~120 bytes
+ * worst case, and the session that writes them is bounded by wall clock and
+ * iteration count -- a few hundred kilobytes at the very top end, in a
+ * directory the recovery already cleans up. Truncating or rotating instead
+ * would buy nothing and cost something: a stat on every tool call, and a file
+ * that shrinks underneath a reader following it by offset.
+ */
+function recordProgress(guard, tool, input) {
+  try {
+    if (!guard || typeof guard.progressPath !== 'string' || !guard.progressPath || !tool) return;
+    const line = JSON.stringify({ t: Date.now(), tool, what: progressWhat(tool, input, guard) });
+    fs.appendFileSync(guard.progressPath, line + '\n');
+  } catch {
+    // A progress line is never worth a denied tool call or a hung session.
+  }
+}
+
 async function main() {
   let event;
   let guard;
@@ -552,6 +628,11 @@ async function main() {
   let reason = null;
   if (FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)) reason = checkFile(tool, input, guard, isNeverTouch);
   else if (tool === 'Bash') reason = checkBash(input, guard, isNeverTouch);
+  // After the verdict, before it is delivered -- and for allowed and denied
+  // calls alike, because a refusal is the single most interesting thing a
+  // watching user can be shown. The verdict is the guard's job; this must not
+  // touch the exit code or the stderr reason.
+  recordProgress(guard, tool, input);
   if (reason) return fail(reason);
   process.exitCode = 0;
 }
@@ -560,4 +641,4 @@ if (require.main === module) {
   main().catch((err) => fail('internal error: ' + (err && err.message)));
 }
 
-module.exports = { DANGEROUS, DRY_RUN_WRITERS, dryRunWriteReason, BULK_READERS, bulkReadReason, recursiveSearchRoots, neverTouchUnder, readsOutsideRepo, shellGlobToRegExp, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob };
+module.exports = { DANGEROUS, DRY_RUN_WRITERS, dryRunWriteReason, BULK_READERS, bulkReadReason, recursiveSearchRoots, neverTouchUnder, readsOutsideRepo, shellGlobToRegExp, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob, progressWhat, recordProgress, PROGRESS_CLIP };

@@ -483,3 +483,149 @@ test('git patch output is refused only when the repo really tracks a never-touch
   assert.equal(run({ tool_name: 'Bash', tool_input: { command: 'git log --oneline' } }, guard).code, 0,
     'and the metadata-only form is still fine');
 });
+
+// --- progress file ---------------------------------------------------------
+
+function progressLines(p) {
+  let raw;
+  try { raw = fs.readFileSync(p, 'utf8'); } catch { return []; }
+  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function withProgress(name) {
+  const p = path.join(cwd, name);
+  try { fs.unlinkSync(p); } catch { /* first run */ }
+  return { p, guard: { ...baseGuard, progressPath: p } };
+}
+
+test('the guard records what the session is doing, for allowed and denied calls alike', () => {
+  const { p, guard } = withProgress('progress-basic.jsonl');
+  const before = Date.now();
+
+  assert.equal(run(bash('npm test'), guard).code, 0);
+  assert.equal(run(file('Edit', path.join(cwd, 'src', 'app.js')), guard).code, 0);
+  const denied = run(bash('cat .env'), guard);
+  assert.equal(denied.code, 2, 'still denied');
+  assert.match(denied.stderr, /never-touch/);
+  assert.equal(denied.stderr.split('\n').length, 1, 'the progress write must not add to stderr');
+
+  const lines = progressLines(p);
+  assert.equal(lines.length, 3, 'one line per tool call, including the refusal');
+  for (const l of lines) {
+    assert.deepEqual(Object.keys(l).sort(), ['t', 'tool', 'what'], 'exactly the three agreed keys');
+    assert.ok(Number.isInteger(l.t) && l.t >= before && l.t <= Date.now() + 1000, 'epoch ms: ' + l.t);
+  }
+  assert.deepEqual(lines.map((l) => l.tool), ['Bash', 'Edit', 'Bash']);
+  assert.equal(lines[0].what, 'npm test');
+  assert.equal(lines[1].what, 'src/app.js', 'file tools record the repo-relative path, not the absolute one');
+  assert.equal(lines[2].what, 'cat .env', 'the denied call is the one a watching user most wants to see');
+});
+
+test('a search records its path, or its pattern when it has no path', () => {
+  const { p, guard } = withProgress('progress-search.jsonl');
+  const ev = (tool, tool_input) => ({ tool_name: tool, tool_input, cwd, hook_event_name: 'PreToolUse' });
+  assert.equal(run(ev('Grep', { pattern: 'TODO', path: path.join(cwd, 'src') }), guard).code, 0);
+  assert.equal(run(ev('Grep', { pattern: 'ENOENT rename' }), guard).code, 0);
+  assert.equal(run(ev('Glob', { pattern: 'test/**/*.test.js' }), guard).code, 0);
+
+  const lines = progressLines(p);
+  assert.deepEqual(lines.map((l) => l.tool), ['Grep', 'Grep', 'Glob']);
+  assert.equal(lines[0].what, 'src', 'a path beats the pattern');
+  assert.equal(lines[1].what, 'ENOENT rename', 'a pathless search still says what it is looking for');
+  assert.equal(lines[2].what, 'test/**/*.test.js');
+});
+
+test('a command on its way to the progress file is redacted before it is clipped', () => {
+  const { p, guard } = withProgress('progress-secret.jsonl');
+  const secret = 'AKIA1234567890ABCDEF';
+  // Straddling the clip boundary is the case that matters: clip first and the
+  // key loses its tail, which is exactly what every redact pattern keys on --
+  // so the readable front of it survives into the file.
+  const straddling = 'node scripts/deploy.js --region us-east-1 --key ' + secret;
+  assert.ok(straddling.indexOf(secret) < 60 && straddling.length > 60, 'the fixture must span the clip');
+  const commands = [straddling, 'echo ' + secret, 'aws configure set aws_secret_access_key ' + secret];
+  for (const c of commands) assert.equal(run(bash(c), guard).code, 0, c);
+
+  const whats = progressLines(p).map((l) => l.what);
+  assert.equal(whats.length, commands.length);
+  for (const what of whats) {
+    assert.ok(!what.includes(secret), 'whole secret leaked: ' + what);
+    assert.ok(!what.includes('AKIA'), 'a fragment of the secret leaked: ' + what);
+    assert.ok(what.length <= 60, 'clipped to one terminal line: ' + what.length);
+  }
+  assert.match(whats[0], /\[REDACTED\]/);
+});
+
+test('a command it cannot redact is not written at all', () => {
+  // hookWith gives the hook a directory with no redact.js beside it. Dropping
+  // the command is the only safe answer: this file exists to be tailed on a
+  // terminal, so an unredactable command must not reach it verbatim.
+  const hook = hookWith('module.exports = { isNeverTouch: () => false };\n');
+  const { p, guard } = withProgress('progress-no-redact.jsonl');
+  const r = run(bash('deploy --token AKIA1234567890ABCDEF'), guard, { hook });
+  assert.equal(r.code, 0, 'the verdict is unaffected');
+  const lines = progressLines(p);
+  assert.deepEqual(lines.map((l) => l.tool), ['Bash'], 'the call is still recorded');
+  assert.equal(lines[0].what, '(command)');
+});
+
+test('a long command is clipped, and the clip is visible', () => {
+  const { p, guard } = withProgress('progress-clip.jsonl');
+  const long = 'node --test ' + 'test/very-long-file-name-'.repeat(8) + 'z.test.js';
+  assert.equal(run(bash(long), guard).code, 0);
+  const [line] = progressLines(p);
+  assert.equal(line.what.length, 60);
+  assert.ok(line.what.endsWith('…'), 'the truncation is marked: ' + line.what);
+  assert.ok(long.startsWith(line.what.slice(0, -1)), 'and it is a prefix of the real command');
+});
+
+test('without progressPath the guard writes nothing at all', () => {
+  const stray = path.join(cwd, 'progress-none.jsonl');
+  try { fs.unlinkSync(stray); } catch { /* first run */ }
+  const before = fs.readdirSync(cwd).sort();
+
+  assert.equal(run(bash('npm test'), baseGuard).code, 0, 'verdicts are unchanged');
+  assert.equal(run(bash('cat .env'), baseGuard).code, 2);
+  assert.equal(run(bash('npm test'), { ...baseGuard, progressPath: '' }).code, 0);
+  assert.equal(run(bash('npm test'), { ...baseGuard, progressPath: 42 }).code, 0, 'a non-string is not a path');
+
+  assert.deepEqual(fs.readdirSync(cwd).sort(), before, 'no file appeared anywhere in the repo');
+});
+
+test('an unwritable progress path never becomes a denied tool call', () => {
+  // The hook runs on every single tool call; a broken progress file must cost
+  // the session nothing. Both shapes throw from appendFileSync.
+  const missingDir = path.join(cwd, 'no-such-dir', 'progress.jsonl');
+  const isADirectory = path.join(cwd, 'progress-dir');
+  fs.mkdirSync(isADirectory, { recursive: true });
+
+  for (const progressPath of [missingDir, isADirectory]) {
+    const guard = { ...baseGuard, progressPath };
+    const ok = run(bash('npm test'), guard);
+    assert.equal(ok.code, 0, 'a safe command is still allowed: ' + progressPath);
+    assert.equal(ok.stderr, '', 'and says nothing on stderr');
+    const no = run(bash('cat .env'), guard);
+    assert.equal(no.code, 2, 'and a dangerous one is still denied');
+    assert.equal(no.stderr.split('\n').length, 1);
+    assert.match(no.stderr, /^phantom guard: .+never-touch/);
+  }
+  assert.ok(!fs.existsSync(missingDir), 'the guard does not create directories');
+});
+
+test('a progress line is appended whole, so concurrent hooks cannot interleave', async () => {
+  const { p, guard } = withProgress('progress-concurrent.jsonl');
+  const { spawn } = require('node:child_process');
+  const env = { ...process.env, PHANTOM_GUARD: JSON.stringify(guard) };
+  // Twelve hook processes appending to one file at the same time -- exactly
+  // what parallel tool calls look like. Every line must still parse.
+  await Promise.all(Array.from({ length: 12 }, (_, i) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [HOOK], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('close', resolve);
+    child.stdin.end(JSON.stringify(bash('node --test test/case-' + i + '.test.js')));
+  })));
+
+  const lines = progressLines(p);
+  assert.equal(lines.length, 12, 'no line was lost or split');
+  assert.deepEqual([...new Set(lines.map((l) => l.tool))], ['Bash']);
+  assert.deepEqual([...new Set(lines.map((l) => l.what))].length, 12, 'and each is intact and distinct');
+});
