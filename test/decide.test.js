@@ -81,7 +81,11 @@ test('answering "m" merges the fix into the user\'s branch', async () => {
     await run(scenario(dir, baseSha), ask);
     assert.strictEqual(ask.calls.length, 1);
     assert.match(ask.calls[0].question, /merge into .*main.*delete it, or keep it/);
-    assert.deepStrictEqual(ask.calls[0].opts.keys, ['m', 'd', 'k']);
+    // `v` (view the diff) and `a` (apply to the working tree) joined the menu:
+    // looking at the change is the thing a person actually wants at this
+    // moment, and `m` takes phantom's COMMIT when people usually want the
+    // change to commit as their own.
+    assert.deepStrictEqual(ask.calls[0].opts.keys, ['m', 'a', 'v', 'd', 'k']);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'), 'module.exports = () => 2;\n');
     assert.strictEqual(git.branchExists('phantom/fix-x', { cwd: dir }), true, 'merging keeps the branch');
     assert.match(out.text(), /merged phantom\/fix-x into main/);
@@ -165,4 +169,63 @@ test('a dirty working tree suppresses the prompt rather than risking the merge',
   await run(scenario(dir, baseSha), ask);
   assert.strictEqual(ask.calls.length, 0);
   assert.strictEqual(git.headSha({ cwd: dir }), baseSha);
+});
+
+test('"v" shows the diff and asks again, changing nothing', async () => {
+  // The one thing a person wants at this instant is to look. Without it they
+  // answered "k", scrolled back, and retyped a 46-character branch name.
+  const { dir, baseSha } = repoWithFix();
+  const out = capture();
+  ui.setStream(out);
+  try {
+    // Look twice, then keep. Looking must be free and repeatable.
+    const answers = ['v', 'v', 'k'];
+    const calls = [];
+    const ask = (question, opts) => { calls.push({ question, opts }); return Promise.resolve(answers.shift()); };
+    await run(scenario(dir, baseSha), ask);
+
+    assert.strictEqual(calls.length, 3, 'v re-asks rather than deciding');
+    assert.match(out.text(), /module\.exports = \(\) => 2/, 'the diff is actually printed');
+    assert.strictEqual(git.branchExists('phantom/fix-x', { cwd: dir }), true, 'and nothing changed');
+    assert.strictEqual(git.headSha({ cwd: dir }), baseSha);
+  } finally { ui.setStream(null); }
+});
+
+test('"a" applies the fix to the working tree, staged and uncommitted', async () => {
+  // `m` lands phantom's commit and message on the user's branch. `a` gives them
+  // the change instead, to amend and commit as their own.
+  const { dir, baseSha } = repoWithFix();
+  const out = capture();
+  ui.setStream(out);
+  try {
+    await run(scenario(dir, baseSha), answers('a'));
+
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'), 'module.exports = () => 2;\n',
+      'the change is in the working tree');
+    assert.strictEqual(git.headSha({ cwd: dir }), baseSha, 'but no commit was made');
+    assert.match(execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: dir, encoding: 'utf8' }), /app\.js/,
+      'and it is staged, ready to commit as the user\'s own');
+    assert.strictEqual(git.branchExists('phantom/fix-x', { cwd: dir }), true, 'the branch is left alone');
+    assert.match(out.text(), /commit it as your own/);
+    assert.match(out.text(), /undo with:/, 'and says how to back out');
+  } finally { ui.setStream(null); }
+});
+
+test('a conflicting "a" reports the conflict instead of unwinding it', async () => {
+  const { dir } = repoWithFix();
+  const g = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  fs.writeFileSync(path.join(dir, 'app.js'), 'module.exports = () => 3;\n');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'diverge');
+  const out = capture();
+  ui.setStream(out);
+  try {
+    await run(scenario(dir, git.headSha({ cwd: dir })), answers('a'));
+    assert.match(out.text(), /conflict/i);
+    assert.match(out.text(), /back out with:/, 'the way out is printed, not guessed at');
+    assert.strictEqual(git.branchExists('phantom/fix-x', { cwd: dir }), true, 'the fix is still there to resolve');
+  } finally {
+    ui.setStream(null);
+    try { execFileSync('git', ['cherry-pick', '--abort'], { cwd: dir, stdio: 'pipe' }); } catch { /* nothing to abort */ }
+  }
 });

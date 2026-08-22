@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-22
+
+Quality-of-life work, from four investigation teams and six implementation agents. The
+investigation found 11 bugs alongside the features, several of them mine from earlier the
+same day.
+
+### Added
+
+- **Live session progress.** A recovery ran up to fifteen minutes showing one spinner
+  line. Phantom already knew what the session was doing and discarded it: the guard hook
+  is a `PreToolUse` hook on every file and Bash tool. It now records a redacted, clipped
+  trail and the spinner repaints from its tail — `1/3 · editing src/math.js · 2m 07s`.
+  Falls back to the plain clock wherever the trail is absent.
+- **`v` and `a` at the end-of-run prompt.** The old `[m/d/k]` did not include the one
+  thing a person wants at that moment: to look at the diff. `v` shows it and asks again;
+  `a` applies the fix to your working tree staged and uncommitted, so you commit it as
+  your own rather than taking phantom's commit and message.
+- **Repeat-crash detection** (`src/history.js`). The same bug crashing three times used to
+  buy three sessions, three branches and three bills — which is the normal shape of a dev
+  loop, because the fix is sitting on an unmerged branch. Suppression is self-clearing by
+  design: it holds only while an unmerged fix branch for that exact error still exists.
+  A prior attempt that *failed* is never suppressed; its report is handed to the next one.
+- **Next-step lines on every non-`fixed` banner.** An unfixed run ended with three
+  attempts, tens of thousands of tokens and nothing to type, while `phantom recover` sat
+  undiscovered. Each outcome now offers the knob that matches why it stopped: more clock
+  for a timeout, more attempts for unfixed, the ceiling for a budget stop.
+- **`phantom ls --json`**, and piped output that keeps everything the terminal had to
+  shorten.
+- **A `FileChanged` hook**, so a finished fix appears mid-turn rather than on your next
+  one. Verified against the installed Claude Code binary's own schemas.
+- A terminal bell after a run longer than 30 s (`PHANTOM_BELL=0` to disable), and a
+  heartbeat line for non-TTY runs, where the log previously held zero bytes for fifteen
+  minutes and could not be told apart from a hang.
+
+### Changed
+
+- **Inside a Claude Code tool call, phantom captures instead of recovering.** The Bash
+  tool times out at 120 s by default (600 s max) and a recovery is allowed 15, so the
+  outer call was killed mid-recovery every time — and it was an outer session paying for
+  an inner one against the same limit while the outer sat blocked. `--nested-recover`
+  overrides.
+- **`phantom ls` writes to stdout**, not stderr. It was unreachable from a pipe: the
+  piped view existed but the default stream meant `phantom ls | grep` got empty output.
+  Anyone using `phantom ls 2>&1 | …` should drop the redirect.
+- An unspecified `--limit` now means unlimited when piped; a 10-row cap is the same silent
+  loss as truncation.
+- The recovery session's hard rules moved to `--append-system-prompt`, so they cannot be
+  lost to compaction mid-recovery, and are re-applied on every resume.
+
+### Security
+
+- **The recovery session inherited the parent session's IPC handles.** `buildClaudeEnv`
+  stripped two variables; Claude Code exports ten, and `CLAUDE_CODE_MESSAGING_SOCKET` and
+  `CLAUDE_CODE_MESSAGING_TOKEN` are a unix socket and bearer token addressed at the user's
+  *live session*. A recovery agent denied `WebFetch`, `curl`, `git push` and `Task` was
+  inheriting a channel back into the session that launched it. Now stripped by prefix, so
+  a variable added later is excluded by default. `CLAUDE_EFFORT` went too — it silently
+  set the recovery's reasoning effort from whatever the outer session was using.
+- **`/phantom:recover` granted `Bash(git *)`.** Slash-command frontmatter has no deny
+  list, so the allow list *is* the boundary — it auto-approved `git push`, `reset --hard`,
+  `clean`, `checkout` and `commit`, every item in the skill's own hard rules.
+- **`--strict-mcp-config`** is now passed: a target repo's `.mcp.json` servers were being
+  spawned by the recovery session, and `--setting-sources project,local` does not drop
+  user-scoped ones.
+
+### Fixed
+
+- **The crash event was never closed on any early-exit path**, so `phantom-status` showed
+  "fixing …" for twenty minutes after a run phantom had *refused*, and the plugin briefed
+  Claude to find a branch that was never created. With `--notify` you waited for a closing
+  ping that could not come.
+- **The crash capture was written below the dirty-tree and missing-claude checks**, so
+  `phantom recover` could not do the two things its own help text promised. After a
+  dirty-tree refusal there was no `.phantom/` at all.
+- **The event log recorded no base**, so the plugin told Claude to run
+  `git diff <base>..<branch>` and Claude guessed `main` — wrong on any feature branch.
+- **`ui.wrap()` inserted newlines inside copyable commands and drew boxes wider than the
+  terminal.** Below 77 columns a `git diff` command was split across two physical lines;
+  below 72 the border itself wrapped into garbage.
+- **The spinner never clipped to the terminal width**, so at ≤48 columns every repaint
+  left the previous row behind as smear.
+- The plugin pointed at a post-mortem template it did not ship, so every interactive
+  recovery wrote its report from memory and drifted from the headless one.
+- `phantom doctor` no longer orphans a shim (`mise`, `asdf`, `volta`, `npx`) whose child
+  outlives its probe.
+
+### Notes
+
+497 → 531 tests. Three of six implementation agents died to API errors mid-write; their
+work was completed and tested by hand.
+
+Adding the nested-capture rule exposed that the test suite normally runs *from* Claude
+Code, so `CLAUDECODE` is set and the whole CLI test file was about to exercise the nested
+branch by accident. Every recovery-path test now declares which side of that it is on.
+Behaviour that depends on the terminal the suite was started from is exactly the class of
+bug this project keeps finding.
+
 ## [0.6.1] - 2026-08-22
 
 Three event-log findings from the original audit that were never actually fixed — I
@@ -597,7 +694,8 @@ has a regression test, and every test was mutation-checked against the 0.3.5 beh
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/waazy-w/claude-phantom/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/waazy-w/claude-phantom/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/waazy-w/claude-phantom/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...v0.5.0

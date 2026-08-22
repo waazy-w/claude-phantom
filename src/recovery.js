@@ -983,9 +983,44 @@ async function offerBranchDecision(final, { ctx, s, config, flags, opts, ask = u
   if (git.isDirty(opts)) return;
 
   const base = ctx.git.branch;
-  const answer = await ask('merge into ' + colors.bold(base) + ', delete it, or keep it for later? '
-    + colors.dim('[m/d/k]'), { keys: ['m', 'd', 'k'] });
-  if (answer === null || answer === 'k') return;
+  // `v` and `a` exist because the old three keys did not include the one thing
+  // a person wants at this instant -- to LOOK at the diff. Answering `k` and
+  // then retyping a 46-character branch name is what everyone actually did.
+  // `a` matters for a different reason: `m` takes phantom's commit and message
+  // onto your branch, when what people usually want is the CHANGE, to amend and
+  // commit as their own.
+  const prompt = 'merge into ' + colors.bold(base) + ', apply to your working tree, view the diff, '
+    + 'delete it, or keep it for later? ' + colors.dim('[m/a/v/d/k]');
+  let answer = null;
+  // `v` re-asks rather than deciding, so looking is free and repeatable.
+  for (let look = 0; look < 5; look++) {
+    answer = await ask(prompt, { keys: ['m', 'a', 'v', 'd', 'k'] });
+    if (answer !== 'v') break;
+    const diff = git.diffText(base, final.branch, opts);
+    if (diff === null) log.warn('could not read the diff; run: git diff ' + base + '..' + final.branch);
+    else if (diff === '') log.info('no differences between ' + base + ' and ' + final.branch);
+    else for (const line of diff.split('\n')) log.info(line);
+  }
+  if (answer === null || answer === 'k' || answer === 'v') return;
+
+  if (answer === 'a') {
+    const applied = git.cherryPickNoCommit(final.branch, opts);
+    if (applied.ok) {
+      log.info(colors.green('applied to your working tree, staged and uncommitted — commit it as your own'));
+      if (applied.files.length) log.info(colors.dim('  ' + applied.files.join(', ')));
+      log.info(colors.dim('undo with: ' + (applied.abortCommand || 'git reset --hard HEAD')));
+      return;
+    }
+    if (applied.conflicted) {
+      log.warn('the fix conflicts with ' + base + '; the tree now carries conflict markers');
+      if (applied.conflicts.length) log.warn('  ' + applied.conflicts.join(', '));
+      if (applied.abortCommand) log.warn('back out with: ' + applied.abortCommand);
+      return;
+    }
+    log.warn('could not apply the fix: ' + (String(applied.stderr || '').trim().split('\n')[0] || 'unknown error'));
+    log.warn('the branch is untouched; merge it instead with: git merge ' + final.branch);
+    return;
+  }
 
   if (answer === 'd') {
     if (git.deleteBranch(final.branch, opts)) log.info('deleted ' + final.branch + '; ' + base + ' is unchanged');

@@ -205,7 +205,7 @@ Flags go before the command; everything after the command is passed through verb
 | Command | What it does |
 |---|---|
 | `phantom doctor` | Checks everything a recovery needs **before** your first crash: that `claude` is installed *and logged in*, that this is a git repo with at least one commit, what test command phantom would run, whether desktop notifications can actually reach you, and whether the status line and plugin are wired. Exits non-zero only on a real failure. |
-| `phantom ls` | This repo's phantom history: `phantom/fix-*` branches (merged or not, age, subject), crash captures, and post-mortems. |
+| `phantom ls` | This repo's phantom history: `phantom/fix-*` branches (merged or not, age, subject), crash captures, and post-mortems. Writes to **stdout**, and drops padding and truncation when piped, so `phantom ls \| grep` loses nothing. `--json` for the whole state as one object. |
 | `phantom clean` | Prunes them. Merged branches only by default — an unmerged fix branch is never deleted without `--unmerged`. `--older-than <days>`, `--all`, `--dry-run`, `--yes`. Merged branches go via `git branch -d`, so git re-checks at deletion time and a stale plan fails instead of destroying work. |
 | `phantom recover` | Replays a crash phantom already captured, without waiting for it to happen again — for retrying a recovery that was refused because the tree was dirty or `claude` was missing. Uses the newest capture unless you name one. `--list`, `--force`. |
 
@@ -220,10 +220,11 @@ Flags go before the command; everything after the command is passed through verb
 | `--max-minutes <n>` | Wall-clock cap for the recovery (default 15, max 120). |
 | `--model <m>` | Passed through as `claude --model <m>`. |
 | `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
-| `--no-prompt` | Never ask whether to merge or delete the fix branch; just print the commands. |
+| `--no-prompt` | Never ask what to do with the fix branch; just print the commands. |
 | `--notify` | Desktop notification on crash and when recovery ends. On macOS this needs `terminal-notifier` (`brew install terminal-notifier`); without it the AppleScript fallback is silently swallowed by Notification Center — see [Desktop notification](#claude-code-integration). |
 | `--webhook <url>` | POST a JSON summary when recovery ends. |
 | `--config <path>` | Use this config file instead of searching for one. A missing file is an error, not a silent fallback. |
+| `--nested-recover` | Recover even when phantom is running inside a Claude Code tool call (see below). |
 | `--verbose` | Stream the session's progress lines. |
 | `--version`, `--help` | |
 
@@ -234,6 +235,10 @@ Flags go before the command; everything after the command is passed through verb
 `PHANTOM_TEST`, `PHANTOM_MODEL`, `PHANTOM_MAX_ITERATIONS`, `PHANTOM_MAX_MINUTES`, `PHANTOM_MAX_TOKENS`, `PHANTOM_MAX_COST_USD`, `PHANTOM_WEBHOOK`, `PHANTOM_CLAUDE_BIN`, `PHANTOM_REPORT_DIR`, `PHANTOM_KEEP_REPORTS`, `PHANTOM_NOTIFY`, `PHANTOM_AUTO_COMMIT`, `PHANTOM_PROMPT_ON_FINISH`, `PHANTOM_VERIFY_COMMAND`.
 
 Values are coerced and validated, and an unparseable one is an error rather than a silent default — `PHANTOM_NOTIFY=maybe` quietly meaning "off" is exactly the misconfiguration that wastes an afternoon.
+
+**When a recovery finishes** on a TTY, phantom asks what to do with the fix branch: `[m/a/v/d/k]` — **m**erge it, **a**pply it to your working tree staged and uncommitted (so you commit it as your own, rather than taking phantom's commit), **v**iew the diff and ask again, **d**elete it, or **k**eep it. Every non-answer — Ctrl+C, EOF, a timeout, a pipe, `--no-prompt` — leaves the branch exactly as it is.
+
+**Inside a Claude Code tool call**, phantom captures the crash instead of recovering it. Claude Code's Bash tool times out at 120 s by default (600 s maximum) and a recovery is allowed 15, so the tool call would be killed mid-recovery every time — and it would be an outer session paying for an inner one against the same limit. The capture is saved and `/phantom:recover` picks it up. `--nested-recover` overrides.
 
 **Exit codes.** Always your command's exit code — a fixed crash is still exit 1, so phantom is safe in scripts and `&&` chains. Signal deaths exit `128 + signal` like a shell (`SIGSEGV` → 139). A command that cannot be found exits 127 and one that cannot be spawned exits 126, matching a shell. During recovery, Ctrl+C exits 130, `SIGTERM` exits 143 and `SIGHUP` exits 129. Invalid flags or config exit 2 before your command runs.
 
