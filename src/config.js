@@ -38,6 +38,11 @@ const DEFAULTS = Object.freeze({
   reportDir: '.phantom/reports',
   ringBufferBytes: 262144,
   claudeBin: 'claude',
+  // How many crash JSONs and post-mortems to keep per repo. Nothing pruned
+  // these, so a month of a crashy dev loop left hundreds of files -- each crash
+  // JSON carrying the full context, tail included, up to ringBufferBytes. 0
+  // disables pruning for anyone who wants the whole history.
+  keepReports: 50,
 });
 
 class ConfigError extends Error {
@@ -101,6 +106,7 @@ function validate(cfg) {
   int('maxIterations', 1, 10);
   int('maxMinutes', 1, 120);
   int('ringBufferBytes', 4096, 64 * 1024 * 1024);
+  int('keepReports', 0, 10000);
   strOrNull('testCommand');
   strOrNull('model');
   strOrNull('webhook');
@@ -112,6 +118,18 @@ function validate(cfg) {
   if (typeof cfg.verifyCommand !== 'boolean') throw new ConfigError('verifyCommand must be true or false');
   if (typeof cfg.notify !== 'boolean') throw new ConfigError('notify must be true or false');
   if (typeof cfg.reportDir !== 'string' || !cfg.reportDir.trim()) throw new ConfigError('reportDir must be a non-empty string');
+  // reportDir is interpolated into the guard hook's command line on Windows,
+  // where arguments are quoted but not escaped -- so a `.phantomrc` carrying
+  // `.phantom/reports" & calc & "` ran calc on every PreToolUse hook. It is
+  // also joined into paths, so `..` segments would put phantom's own files
+  // outside the repository it is allowed to touch. Neither is anything a real
+  // report directory needs.
+  if (/["'`$&|;<>^%!\r\n]/.test(cfg.reportDir)) {
+    throw new ConfigError('reportDir must not contain shell metacharacters (got ' + JSON.stringify(cfg.reportDir) + ')');
+  }
+  if (path.isAbsolute(cfg.reportDir) || cfg.reportDir.split(/[/\\]/).includes('..')) {
+    throw new ConfigError('reportDir must be a relative path inside the repository (got ' + JSON.stringify(cfg.reportDir) + ')');
+  }
   if (typeof cfg.claudeBin !== 'string' || !cfg.claudeBin.trim()) throw new ConfigError('claudeBin must be a non-empty string');
   if (!Array.isArray(cfg.neverTouch) || cfg.neverTouch.some((g) => typeof g !== 'string')) {
     throw new ConfigError('neverTouch must be an array of glob strings');

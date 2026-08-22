@@ -111,64 +111,78 @@ Nothing here trusts the agent's own word: phantom runs your test command itself,
 | Rail | Mechanism |
 |---|---|
 | Never your branch | `git checkout -b phantom/fix-<slug>-<ts>` from `HEAD` before any edit; your branch is checked back out when phantom finishes, success or failure. The fix exists only as a branch to diff, merge, or delete. |
-| Minimal tools | `--permission-mode dontAsk` with an explicit allowlist: `Read, Edit, Write, MultiEdit, Grep, Glob`, your test command, `npm test` / `npm run test` / `npx vitest\|jest\|mocha`, `node`, read-only git (`diff`, `log`, `status`, `show`), and `ls cat head tail grep pwd`. Everything else is denied without prompting. (Claude Code auto-approves read-only shell commands in headless mode; phantom cannot tighten that.) |
-| Explicit denies | `--disallowedTools`: `WebFetch`, `WebSearch`, `Task`, `Agent`, `NotebookEdit`, `git push/checkout/switch/reset/stash/rebase/commit/clean`, `rm`, `curl`, `wget`, `npm install/i/ci`, `npx prisma`, `sudo`. Denies win over allows. |
-| Guard hook | A zero-dependency `PreToolUse` hook (`src/guard-hook.js`, fails closed) inspects every `Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob` call: blocks never-touch paths (including via `cat`, redirects, `../`, absolute paths), destructive shell (`rm -r`, `chmod -R`, `dd`, `mkfs`, `kill`), installs, network clients, migrations, container/cluster tools, `DROP TABLE`/`TRUNCATE`, and every state-changing git command. In dry-run it blocks every write except the report. |
-| Never-touch files, enforced three times | `neverTouch` globs (default `.env`, `.env.*`, `**/*.pem`, `**/*.key`, `**/secrets/**`, `**/*.secret*`) plus the fixed `.git/**`, `node_modules/**` are (1) permission deny rules for the session, (2) checked by the guard hook on every call, (3) audited afterwards via `git diff --name-only <baseSha>`, untracked files, and a size/mtime/inode snapshot taken before the session (covers gitignored files; contents are never read). Any hit discards the session's changes (`git reset --hard && git clean -fd`) and the report says why. Untracked files cannot be restored by phantom; the banner tells you to inspect them. |
+| Minimal tools | `--permission-mode dontAsk` with an explicit allowlist: `Read, Edit, Write, MultiEdit, Grep, Glob`, your test command, `npm test` / `npm run test <args>` / `npx vitest\|jest\|mocha`, `node`, read-only git (`diff`, `log`, `status`, `show`), and `ls cat head tail grep pwd`. Everything else is denied without prompting. (Claude Code auto-approves read-only shell commands in headless mode; phantom cannot tighten that.) |
+| Explicit denies | `--disallowedTools`, abridged: `WebFetch`, `WebSearch`, `Task`, `Agent`, `NotebookEdit`, every state-changing git command (`push`, `checkout`, `switch`, `reset`, `stash`, `rebase`, `commit`, `clean`, `merge`, `branch -D`), `rm`, `rmdir`, `curl`, `wget`, `ssh`, `scp`, package managers (`npm install/i/ci/uninstall`, `yarn add`, `pnpm add`, `pip install`), `npx prisma`, `chmod -R`, `chown`, `docker`, `kubectl`, `pkill`, `killall`, `sudo`. See `DENY` in `src/prompt.js` for the full list. Denies win over allows. |
+| Guard hook | A zero-dependency `PreToolUse` hook (`src/guard-hook.js`, fails closed) inspects every `Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob` call: blocks never-touch paths (via `cat`, redirects spaced or not, shell globs, `../`, absolute paths), any path outside the repository (`/etc/passwd`, `~/.ssh/id_rsa`), destructive shell (`rm -r`, `chmod -R`, `dd`, `mkfs`, `kill`), installs, network clients, migrations, container/cluster tools, `DROP TABLE`/`TRUNCATE`, and every state-changing git command. It also refuses **bulk reads** — commands that read many files without naming one: a recursive `grep` over a directory that holds never-touch files, `git show <rev>:<path>` for such a path, `git log -p` in a repo that tracks one, `find -exec`, `tar`, `xargs`, `base64`. In dry-run it blocks every write, Bash redirects and `sed -i` included, except the report. |
+| Never-touch files, enforced three times | `neverTouch` globs (default `.env`, `.env.*`, `**/*.pem`, `**/*.key`, `**/secrets/**`, `**/*.secret*`) plus the fixed `.git/**`, `node_modules/**` are (1) permission deny rules for the session, (2) checked by the guard hook on every call, (3) audited afterwards via `git diff --name-only <baseSha>`, untracked files, and a size/mtime/inode snapshot taken before the session (covers gitignored files; contents are never read). Any hit discards the session's changes (`git reset --hard && git clean -fd`) and the report says why — and if that revert does not succeed, phantom says so rather than claiming it did. Untracked files cannot be restored by phantom; the banner tells you to inspect them. |
 | No pushes, no PRs | `git push` is denied, there is no network tool, and phantom has no push code path. Not configurable. |
-| Ctrl+C is a kill switch | Kills the Claude process tree, `git reset --hard` + `git clean -fd` on the fix branch, checks out your branch, pops the snapshot stash if any, exits 130. |
+| Ctrl+C is a kill switch | Kills the Claude process tree, rescues any untracked file into a stash first, `git reset --hard` + `git clean -fd` on the fix branch, checks out your branch, restores the snapshot stash if any, exits 130. `SIGTERM` (143) and `SIGHUP` (129) — a closed terminal or a dropped SSH session — do the same. |
 | Silent crash declined | A non-zero exit with no error line, no stack trace, no file named in the output *and* no test command is refused: the session would have nothing to locate the fault with and nothing to verify against. Common for linters and build tools. `--dry-run` still runs. |
-| Dirty tree refused | Uncommitted changes → status `refused`, nothing happens. `--allow-dirty` stashes a snapshot (`git stash push -u -m "phantom-snapshot-<ts>"`) and pops it back once you are on your branch (also on Ctrl+C); with `--no-commit` it prints the exact `git stash pop`. `--dry-run` never needs a clean tree. |
-| Hard caps | `maxIterations` (3) bounds Claude invocations; `maxMinutes` (15) is a wall-clock timer that kills the child. |
-| Dry run | `--dry-run`: no branch, no edits (`Edit`/`MultiEdit` removed, writes rejected except the report). Diagnosis and proposed diff go into the report; the only writes are under `.phantom/`. |
+| Dirty tree refused | Uncommitted changes → status `refused`, nothing happens. `--allow-dirty` stashes a snapshot (`git stash push -u -m "phantom-snapshot-<ts>"`) and pops it back once you are on your branch (also on Ctrl+C); with `--no-commit` it prints the exact `git stash apply <sha>` (by sha, so a stash pushed meanwhile by another shell cannot be popped by mistake). `--dry-run` never needs a clean tree. |
+| Hard caps | `maxIterations` (3) bounds Claude invocations; `maxMinutes` (15) is a wall-clock timer that kills the child; each session also carries `--max-turns` (80, or 40 on a resume), so a session that loops without converging is ended by Claude Code itself. |
+| Dry run | `--dry-run`: no branch, no edits (`Edit`/`MultiEdit` removed, writes rejected except the report, Bash redirects and `sed -i` refused too). Diagnosis and proposed diff go into the report; the only writes are under `.phantom/`. Because there is no branch to revert, phantom also measures the tree afterwards: anything the session wrote anyway is named, undone file by file, and reported as an error rather than a clean dry run. |
 | Isolated session | `--setting-sources project,local`: your user-level `~/.claude/settings.json` (hooks, permission allows, env), your installed plugins, and their MCP servers are not loaded into the recovery session, so nothing personal can rewrite, approve, or observe its commands. Project `.claude/settings.json` still applies; phantom's deny rules and guard hook are passed explicitly via `--settings` and verified to register in this mode. |
 | Off switch | `PHANTOM_DISABLED=1` → pure passthrough. |
 
-The session can see your tracked and untracked source (minus never-touch globs), the redacted last 256 KiB of output, read-only git history, `package.json` name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, run migrations, or commit to your branch.
+The session can see your tracked and untracked source (minus never-touch globs), a redacted slice of the crash output (the last 200 lines, capped at 24 KiB — `ringBufferBytes`, 256 KiB by default, is how much phantom *retains*, not how much the session is shown), read-only git history, `package.json` name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, run migrations, or commit to your branch.
 
 **Not a sandbox.** The session may run `node` (it has to, to run your tests), and a `node -e` one-liner can in principle read any file your user can read or open a socket. The guard is lexical; branch isolation, the post-session audit, and the no-push rule are the real backstops. Need hard isolation? Run phantom in a container.
 
-**Redaction.** The output tail is scrubbed before the session sees it (`KEY=value` with secret-looking names, `Authorization` headers, `sk-`/`ghp_`/`AKIA`/`xox` tokens, JWTs, URL credentials, PEM blocks → `[REDACTED]`). Pattern-based, so a safety net, not a guarantee.
+**Redaction.** The output tail *and the command line phantom displays* are scrubbed before anything sees them — the model's prompt, the post-mortem, the crash JSON, the desktop notification and the webhook payload (`KEY=value` with secret-looking names, quoted multi-word values, `Authorization` headers, `?api_key=`-style URL query credentials, `sk-`/`sk_`/`ghp_`/`AKIA`/`xox` tokens, JWTs, URL credentials, PEM blocks → `[REDACTED]`). The raw argv is kept only to re-run your command. Pattern-based, so a safety net, not a guarantee.
 
 ## What you get back
 
-A banner on your original branch:
+A banner on your original branch (real output, from `examples/crash-demo`):
 
 ```
-phantom: ✅ FIXED on phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-  report   .phantom/reports/20260820-184107-typeerror-cannot-read-properties-of-undefined.md
-  review   git diff main..phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-  merge    git merge phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-  discard  git branch -D phantom/fix-typeerror-cannot-read-properties-of-undefined-k3f9a2
-  session  192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b  (claude --resume 192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b)
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ 👻 phantom ✅ fixed · 1m 48s · 34.1k tokens (12k new · 22.1k cached)          │
+│ fix verified by phantom: tests pass and the command no longer crashes; your   │
+│ branch is unchanged                                                           │
+│                                                                               │
+│ branch  phantom/fix-typeerror-cannot-read-properties-k3f9a                    │
+│ review  git diff main..phantom/fix-typeerror-cannot-read-properties-k3f9a     │
+│ accept  git merge phantom/fix-typeerror-cannot-read-properties-k3f9a          │
+│ reject  git branch -D phantom/fix-typeerror-cannot-read-properties-k3f9a      │
+│                                                                               │
+│ report  .phantom/reports/20260820-184107-typeerror-cannot-read-properties.md  │
+│ session 192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b  (claude --resume 192389b5-…)    │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-And a markdown post-mortem in `.phantom/reports/` (trimmed, from `examples/crash-demo`):
+And a markdown post-mortem in `.phantom/reports/`. The `TL;DR` and the analysis
+below it come from the session; everything in the verification table is measured
+by phantom (trimmed):
 
 ```markdown
-# Post-mortem: TypeError: Cannot read properties of undefined (reading 'email')
-Status: ✅ FIXED    Branch: phantom/fix-typeerror-…-k3f9a2    Command: npm start  Exit: 1
-Session: 192389b5-… — transcript in ~/.claude/projects/, reopen with `claude --resume 192389b5-…`
+# 👻 Phantom post-mortem — TypeError: Cannot read properties of undefined (reading 'email')
 
-## Root cause
-`formatOrderLine` in `src/report.js:9` dereferences `order.customer.email`
-unconditionally; `data/orders.json` has a guest checkout with no `customer`.
+> **Status:** ✅ FIXED
 
-## Blast radius
-`buildReport` runs on startup and on every request, so one guest order takes
-the whole service down. Existing tests only covered orders with a customer.
+| | |
+|---|---|
+| **Iterations** | 1 |
+| **Duration** | 1m 48s |
+| **Model / tokens** | 34.1k tokens (12k new · 22.1k cached) |
 
-## Fix
-    -  const email = order.customer.email;
-    +  const email = order.customer?.email ?? '(guest)';
-Regression test added: test/report.test.js → "formatOrderLine tolerates a guest order".
+## TL;DR
+
+`formatOrderLine` dereferenced `order.customer.email` unconditionally, and
+`data/orders.json` has a guest checkout with no `customer`. Optional chaining
+with a `(guest)` fallback; regression test added.
 
 ## Verification (independent)
-| Step                          | Command   | Result                 |
-| Reproduce (new test, pre-fix) | npm test  | ❌ 1 failed, 4 passed   |
-| Verify (post-fix)             | npm test  | ✅ 5 passed             |
-| Original command              | npm start | ✅ exit 0               |
-Iterations: 1/3  Wall clock: 1m 48s  Never-touch audit: clean
+
+| Check | Result |
+|---|---|
+| Tests run by phantom | ✅ passed — `npm test` |
+| Crashed command re-run | ✅ exits 0 — `npm start` |
+| Files changed | `src/report.js`, `test/report.test.js` |
+| Never-touch audit | ✅ clean |
+| Branch | `phantom/fix-typeerror-cannot-read-properties-k3f9a` from `main` @ `a1b2c3d4e5` |
+| Iterations used | 1 |
+| Wall clock | 1m 48s |
+| Session | `192389b5-…` — transcript in `~/.claude/projects/`, reopen with `claude --resume 192389b5-…` |
 ```
 
 The verification section and metadata are written by phantom, not the session. The session id points at Claude Code's full transcript of the recovery (every tool call and file read) under `~/.claude/projects/`; `claude --resume <id>` reopens it so you can ask the session what it did. If the session produces no report, phantom writes a fallback with the crash context and whatever the session said. Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete. `.phantom/` is kept out of git via `.git/info/exclude`; commit it if you want a history.
@@ -191,15 +205,17 @@ Flags go before the command; everything after the command is passed through verb
 | `--model <m>` | Passed through as `claude --model <m>`. |
 | `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
 | `--no-prompt` | Never ask whether to merge or delete the fix branch; just print the commands. |
-| `--notify` | Desktop notification on crash and when recovery ends. macOS needs a one-time permission — see [Desktop notification](#claude-code-integration). |
+| `--notify` | Desktop notification on crash and when recovery ends. On macOS this needs `terminal-notifier` (`brew install terminal-notifier`); without it the AppleScript fallback is silently swallowed by Notification Center — see [Desktop notification](#claude-code-integration). |
 | `--verbose` | Stream the session's progress lines. |
 | `--version`, `--help` | |
 
-**Exit codes.** Always your command's exit code — a fixed crash is still exit 1, so phantom is safe in scripts and `&&` chains. Signal deaths exit `128 + signal` like a shell (`SIGSEGV` → 139); Ctrl+C during recovery exits 130; invalid flags or config exit 2 before your command runs.
+**Exit codes.** Always your command's exit code — a fixed crash is still exit 1, so phantom is safe in scripts and `&&` chains. Signal deaths exit `128 + signal` like a shell (`SIGSEGV` → 139). A command that cannot be found exits 127 and one that cannot be spawned exits 126, matching a shell. During recovery, Ctrl+C exits 130, `SIGTERM` exits 143 and `SIGHUP` exits 129. Invalid flags or config exit 2 before your command runs.
 
 ## Configuration
 
-`.phantomrc` (JSON) at the git root, or a `"phantom"` key in `package.json`. Precedence: flags > `.phantomrc` > `package.json` > defaults. Every key at its default:
+`.phantomrc` (JSON), or a `"phantom"` key in `package.json`. Precedence: flags > `.phantomrc` > `package.json` > defaults.
+
+Both files are looked for in the directory you ran from **first**, then at the git root, and the first hit wins — so a `.phantomrc` in a subdirectory silently overrides the one at the root rather than merging with it. Every key at its default:
 
 ```jsonc
 {
@@ -214,8 +230,9 @@ Flags go before the command; everything after the command is passed through verb
   "autoCommit": true,             // commit a successful fix on the phantom branch (never on yours)
   "promptOnFinish": true,         // after a verified fix, ask whether to merge or delete the branch (TTY only)
   "verifyCommand": true,          // after the tests pass, re-run the command that crashed (30 s cap; still running = fixed)
-  "reportDir": ".phantom/reports",// crash captures go to the sibling crashes/
-  "ringBufferBytes": 262144,      // output kept for crash context
+  "reportDir": ".phantom/reports",// relative to the repo, no shell metacharacters; crash captures go to the sibling crashes/
+  "ringBufferBytes": 262144,      // output phantom retains for crash context (the session sees the last 200 lines of it, capped at 24 KiB)
+  "keepReports": 50,              // crash JSONs and post-mortems kept per repo; 0 keeps everything
   "claudeBin": "claude"           // Claude Code executable
 }
 ```

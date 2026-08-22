@@ -161,6 +161,9 @@ function describeCommand(command, args) {
  *           recovery?: { runRecovery: Function } }} [io] test hooks; recovery overrides require('./recovery')
  * @returns {Promise<number>} exit code for the process
  */
+/** Statuses whose outcome the recovery banner already states in full. */
+const BANNERED = new Set(['fixed', 'unfixed', 'dry-run', 'timeout', 'aborted']);
+
 async function main(argv = process.argv.slice(2), io = {}) {
   const cwd = io.cwd || process.cwd();
   const env = io.env || process.env;
@@ -235,11 +238,17 @@ async function main(argv = process.argv.slice(2), io = {}) {
     : ctx.git.dirty && !flags.allowDirty && !flags.dryRun
       ? 'uncommitted changes in the working tree (commit, stash, or pass --allow-dirty)'
       : nothingToGoOn ? 'no error output and no test command — nothing to diagnose or verify against' : null;
-  if (ctx.git) await announce.announceCrash(ctx, config, ctx.git.root);
+  // Announce only what phantom is actually going to do. This used to run before
+  // the refusal check, so a crash phantom explicitly DECLINED to recover still
+  // appended a crash event -- and since no recovery event ever follows, both
+  // readers treat it as work in progress: the status line shows "fixing <cmd>…"
+  // for the full 20-minute window, and the plugin briefs Claude to go looking
+  // for a fix branch that was never created.
   if (refusal) {
     log.warn(describeCommand(command, args) + ' crashed (' + summarizeExit(result) + '); phantom is not recovering: ' + refusal);
     return childExit;
   }
+  if (ctx.git) await announce.announceCrash(ctx, config, ctx.git.root);
   const lines = [
     colors.bold('⚠ ' + describeCommand(command, args) + ' crashed (' + summarizeExit(result) + ') — phantom is taking over'),
   ];
@@ -260,7 +269,13 @@ async function main(argv = process.argv.slice(2), io = {}) {
   }
   try {
     const outcome = await recovery.runRecovery(ctx, config, flags);
-    if (outcome && outcome.message) log.info(outcome.status + ': ' + outcome.message);
+    // The banner printed by runRecovery already carries the status and message,
+    // and it is the last thing the user reads. Repeating it here put the same
+    // sentence on screen twice, every run. Only statuses that never reach the
+    // banner -- the early refusals and errors -- still need a line of their own.
+    if (outcome && outcome.message && !outcome.reported && !BANNERED.has(outcome.status)) {
+      log.info(outcome.status + ': ' + outcome.message);
+    }
   } catch (err) {
     log.error('recovery failed: ' + (err && err.stack ? err.stack : err));
   }

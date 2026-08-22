@@ -32,7 +32,53 @@ const colors = {
 };
 
 const ANSI_RE = new RegExp(ESC + '\\[[0-9;]*m', 'g');
-const visibleLength = (s) => String(s).replace(ANSI_RE, '').length;
+
+/**
+ * Terminal COLUMNS a string occupies, not UTF-16 code units.
+ *
+ * The two differ in both directions and the banner is built out of exactly the
+ * characters where they differ: ✅ ❌ ⚠ 🔍 👻 are one or two code units but two
+ * columns each, so `.length` under-counted and the box's right border landed
+ * short -- on the success banner, which is the one users see most. Astral
+ * characters (👻) are also two code units for one character, so a naive
+ * `.length` is wrong twice over.
+ *
+ * This is a pragmatic width table, not a full UAX #11 implementation: the wide
+ * ranges phantom actually prints, plus zero-width combining marks and variation
+ * selectors, which otherwise each added a phantom column.
+ */
+function charWidth(cp) {
+  // Combining marks, zero-width joiners/spaces, variation selectors.
+  if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0xfeff) return 0;
+  if (cp >= 0x0300 && cp <= 0x036f) return 0;
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return 0;
+  if (cp >= 0x1ab0 && cp <= 0x1aff) return 0;
+  if (cp >= 0x20d0 && cp <= 0x20ff) return 0;
+  // East Asian Wide / Fullwidth, and the emoji planes.
+  if (cp >= 0x1100 && (
+    (cp <= 0x115f)                              // Hangul Jamo
+    || cp === 0x2329 || cp === 0x232a
+    || (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f)  // CJK
+    || (cp >= 0xac00 && cp <= 0xd7a3)           // Hangul syllables
+    || (cp >= 0xf900 && cp <= 0xfaff)           // CJK compatibility
+    || (cp >= 0xfe30 && cp <= 0xfe6f)
+    || (cp >= 0xff00 && cp <= 0xff60)           // Fullwidth forms
+    || (cp >= 0xffe0 && cp <= 0xffe6)
+    || (cp >= 0x1f300 && cp <= 0x1f64f)         // emoji, incl. 👻 🔍
+    || (cp >= 0x1f900 && cp <= 0x1f9ff)
+    || (cp >= 0x20000 && cp <= 0x3fffd)
+  )) return 2;
+  // Symbols that render double-width in practice: ✅ ❌ ⚠ and friends.
+  if (cp === 0x2705 || cp === 0x274c || cp === 0x274e) return 2;
+  if (cp >= 0x2b00 && cp <= 0x2bff) return 2;
+  return 1;
+}
+
+const visibleLength = (s) => {
+  let width = 0;
+  for (const ch of String(s).replace(ANSI_RE, '')) width += charWidth(ch.codePointAt(0));
+  return width;
+};
 
 function wrap(line, width) {
   if (visibleLength(line) <= width) return [line];

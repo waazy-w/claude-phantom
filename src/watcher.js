@@ -228,6 +228,34 @@ function exitCodeFor(runResult) {
  * tree; /F is required because there is no graceful signal to send.
  * @returns {boolean} whether a kill was issued
  */
+/**
+ * Kill a process tree by pid, for callers that have no child object -- notably
+ * spawnSync, whose own `timeout` sends a signal to the direct child ONLY.
+ *
+ * That is the wrong shape for what phantom runs. `npm run dev` is npm spawning
+ * node; killing npm leaves the server running and holding its port, so the
+ * user's next real `npm run dev` fails with EADDRINUSE and nothing points at
+ * phantom. Worse, it happens on the documented SUCCESS path: "still running
+ * after Ns counts as fixed" means the timeout fires every time a long-lived
+ * command is repaired.
+ *
+ * @returns {boolean} true when a kill was attempted
+ */
+function killTreeByPid(pid, signal = 'SIGKILL') {
+  if (!pid) return false;
+  if (process.platform === 'win32') {
+    try {
+      spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } catch { /* taskkill missing or the tree is already gone */ }
+    return true;
+  }
+  // Negative pid targets the whole process group, which is why the caller
+  // spawns with detached: true -- that makes the child a group leader whose
+  // pgid equals its pid, so this reaches its children too.
+  try { process.kill(-pid, signal); return true; } catch { /* no group */ }
+  try { process.kill(pid, signal); return true; } catch { return false; }
+}
+
 function killTree(child, signal) {
   if (!child || child.pid === undefined) return false;
   if (process.platform !== 'win32') {
@@ -264,6 +292,6 @@ function windowsSafeSpawn(command, args, cwd, env) {
 }
 
 module.exports = {
-  runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS,
+  runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS, killTreeByPid,
   windowsSafeSpawn, resolveWindowsCommand, escapeArgForCmd, killTree,
 };

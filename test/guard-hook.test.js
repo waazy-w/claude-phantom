@@ -352,3 +352,134 @@ test('a dry run refuses Bash commands that write, not just the file tools', () =
     assert.equal(run({ tool_name: 'Bash', tool_input: { command } }).code, 0, 'allowed in a real run: ' + command);
   }
 });
+
+test('a redirect written without a space is still a redirect', () => {
+  // `<` and `>` were not in the tokenizer's split class, so `cat<.env` produced
+  // one token that matched no glob and no path. The spaced forms were caught
+  // all along, which is what made the gap easy to miss. The write direction is
+  // the dangerous one: `echo pwned>.env` destroyed a gitignored .env outright,
+  // which is precisely the case recovery.js calls beyond recovery.
+  for (const command of ['cat<.env', 'cat 0<.env', 'echo pwned>.env', 'echo x>>.env', "echo y>'.env'", 'cat< .env']) {
+    const r = run({ tool_name: 'Bash', tool_input: { command } });
+    assert.equal(r.code, 2, 'should be refused: ' + command);
+  }
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: 'node app.js>out.log' } }).code, 0,
+    'an ordinary redirect to an ordinary file still works');
+});
+
+test('bracket globs expand the way the shell expands them', () => {
+  // expandGlob used the never-touch matcher, which escapes [ and ] -- so
+  // `.[e]nv` compiled to /^\.\[e\]nv$/ and matched neither the file on disk nor
+  // the `.env` rule. The guard allowed it; the shell then expanded it and
+  // printed the secret.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-glob-'));
+  fs.writeFileSync(path.join(dir, '.env'), 'SECRET=1\n');
+  fs.writeFileSync(path.join(dir, 'README.md'), '# hi\n');
+  const guard = { ...baseGuard, cwd: dir };
+  for (const command of ['cat .[e]nv', 'cat .en[v]', 'cat .e?v', 'cat .en*']) {
+    assert.equal(run({ tool_name: 'Bash', tool_input: { command } }, guard).code, 2, command);
+  }
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: 'cat READ[M]E.md' } }, guard).code, 0,
+    'a bracket glob over an ordinary file is fine');
+});
+
+test('Bash may not read outside the repository, just as the file tools may not', () => {
+  // checkFile hard-denied an escaping path from the start; checkBash only
+  // glob-tested them, so `cat ~/.ssh/id_rsa` was allowed through the one tool
+  // that could ignore the prompt's "work only inside the repository". `~` never
+  // resolved either, so it was missed twice over.
+  for (const command of ['cat /etc/passwd', 'cat ~/.ssh/id_rsa', 'cat ~/.aws/credentials', 'cat ~/.netrc', 'head ~/.claude.json']) {
+    const r = run({ tool_name: 'Bash', tool_input: { command } });
+    assert.equal(r.code, 2, 'should be refused: ' + command);
+    assert.match(r.stderr, /outside the repository|never-touch/, command);
+  }
+  // The same paths were already refused for Read; Bash now agrees with it.
+  assert.equal(run({ tool_name: 'Read', tool_input: { file_path: '/etc/passwd' } }).code, 2);
+  // Relative work inside the repo is untouched.
+  for (const command of ['cat src/app.js', 'cat ./src/app.js', 'npm test', 'node --test test/math.test.js']) {
+    assert.equal(run({ tool_name: 'Bash', tool_input: { command } }).code, 0, command);
+  }
+});
+
+test('commands that read everything without naming anything are refused', () => {
+  // The path checks are lexical: they can only refuse a path that appears in
+  // the command. These read every file in the repo -- a gitignored .env, all of
+  // secrets/ -- while naming none of them, and Bash(grep *), Bash(git log *)
+  // and Bash(git show *) are all on the allowlist. In a sandbox repo
+  // `grep -rs . .` printed the AWS key and `git log -p` printed it from history.
+  // A repo with a never-touch file at the root and a clean subdirectory: the
+  // difference between the two is the whole point of the check being
+  // scope-aware rather than a flat ban.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-bulk-'));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'secrets'));
+  fs.writeFileSync(path.join(dir, '.env'), 'AWS_SECRET=wJalrXUtnFEMI\n');
+  fs.writeFileSync(path.join(dir, 'secrets', 'prod.key'), 'k\n');
+  fs.writeFileSync(path.join(dir, 'src', 'app.js'), '// TODO fix\n');
+  const guard = { ...baseGuard, cwd: dir };
+  const bash = (command) => run({ tool_name: 'Bash', tool_input: { command } }, guard);
+
+  const blocked = [
+    'grep -rs SECRET .',              // walks the root, where .env lives
+    'grep -r . .',
+    'grep --recursive x .',
+    'git show HEAD:.env',             // the path hides after a colon
+    'git cat-file -p HEAD:.env',
+    'find . -type f -exec cat {} +',
+    'tar cf - . | base64',
+    'cat list.txt | xargs cat',
+    'base64 .env',
+  ];
+  for (const command of blocked) {
+    assert.equal(bash(command).code, 2, 'should be refused: ' + command);
+  }
+
+  // Everything a crash fix actually needs still works -- including a recursive
+  // search scoped to a directory that holds nothing never-touch. Refusing that
+  // would buy no safety and push the session toward worse tools.
+  const allowed = [
+    'npm test',
+    'node --test test/math.test.js',
+    'cat src/app.js',
+    'grep -n TODO src/app.js',
+    'grep -rn TODO src',
+    'grep -rn TODO ./src',
+    'git log --oneline -5',
+    'git diff --stat',
+    'git status',
+    'ls -la src',
+  ];
+  for (const command of allowed) {
+    assert.equal(bash(command).code, 0, 'should be allowed: ' + command);
+  }
+});
+
+test('git patch output is refused only when the repo really tracks a never-touch file', () => {
+  // `git log -p` prints file contents, so it is a leak exactly when something
+  // never-touch is committed -- and a false alarm otherwise. Checking rather
+  // than assuming keeps a genuinely useful diagnostic available.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-tracked-'));
+  const g = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'app.js'), 'x\n');
+  g('init', '-q', '-b', 'main');
+  g('config', 'user.email', 't@example.com');
+  g('config', 'user.name', 'Test');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'init');
+
+  const guard = { ...baseGuard, cwd: dir };
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: 'git log -p' } }, guard).code, 0,
+    'nothing never-touch is tracked, so the patch is safe to read');
+
+  fs.mkdirSync(path.join(dir, 'secrets'));
+  fs.writeFileSync(path.join(dir, 'secrets', 'prod.key'), 'k\n');
+  g('add', '-f', 'secrets/prod.key');
+  g('commit', '-q', '-m', 'oops');
+
+  const r = run({ tool_name: 'Bash', tool_input: { command: 'git log -p' } }, guard);
+  assert.equal(r.code, 2, 'now the same command would print the committed key');
+  assert.match(r.stderr, /tracks never-touch files/);
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: 'git log --oneline' } }, guard).code, 0,
+    'and the metadata-only form is still fine');
+});

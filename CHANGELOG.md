@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-22
+
+Closes the rest of the audit: the guard bypasses, the resource leaks, and every
+documentation claim that was not true.
+
+### Security
+
+- **Commands that read everything without naming anything are refused.** The path
+  checks are lexical — they can only refuse a path that appears in the command line —
+  so `grep -rs . .`, `git log -p`, `git show HEAD:.env`, `find . -exec cat {} +` and
+  `tar cf - . | base64` read every file in the repo while naming none, and
+  `Bash(grep *)`, `Bash(git log *)` and `Bash(git show *)` are all on the allowlist. In
+  a sandbox repo `grep -rs . .` printed the AWS key and `git log -p` printed it out of
+  history. The check is scope-aware rather than a flat ban: a recursive search is
+  refused only when the directory it would walk actually holds never-touch files, and
+  `git log -p` only when the repo actually tracks one, so `grep -rn TODO src` still works.
+- **A redirect without a space defeated the tokenizer.** `<` and `>` were not split
+  characters, so `cat<.env`, `cat 0<.env` and `echo pwned>.env` produced one token that
+  matched no glob and no path. The spaced forms were caught all along, which is what made
+  the gap easy to miss; the write form destroyed a gitignored `.env` outright.
+- **Bash could read outside the repository.** `checkFile` hard-denied an escaping path
+  from the first release, but `checkBash` only glob-tested them — so `cat /etc/passwd`,
+  `cat ~/.ssh/id_rsa` and `cat ~/.aws/credentials` were allowed through the one tool that
+  can ignore the prompt's "work only inside the repository". `~` never resolved either.
+- **Bracket globs matched nothing, in either direction.** `expandGlob` compiled them with
+  the never-touch matcher, which escapes `[` and `]`, so `.[e]nv` matched neither the file
+  on disk nor the `.env` rule — the guard allowed it and the shell then expanded it.
+  Expansion now follows shell rules; never-touch rules keep theirs.
+- **`reportDir` is validated.** It is interpolated into the guard hook's command line on
+  Windows, where arguments are quoted but not escaped, so a `.phantomrc` reading
+  `.phantom/reports" & calc & "` ran `calc` on every `PreToolUse` hook. It was checked
+  only as "a non-empty string"; it must now be a relative path with no shell
+  metacharacters and no `..`.
+
+### Fixed
+
+- **Ring-buffer memory was driven by the number of writes, not their size.** Every write
+  became its own Buffer and the index array grew to twice the live chunk count before
+  compacting, so an unbuffered child cost ~130 bytes of heap per retained byte — 30 MB of
+  heap and 255 MB of RSS for a 256 KB tail. Small writes are now coalesced into blocks:
+  the same workload costs 0.3 bytes per byte. A retained oversized chunk is also copied
+  rather than kept as a `subarray` view, which used to pin the whole original allocation.
+- **The output tail could start mid-character.** Eviction cuts on a byte boundary, so
+  decoding produced U+FFFD at the head of the tail for any non-ASCII output, and that
+  flowed into the crash JSON, the prompt and the report.
+- **Every successful `phantom npm run dev` recovery orphaned a process tree.** `spawnSync`'s
+  `timeout` signals the direct child only — npm, not the server it started — which kept
+  running and kept its port, so the user's next real `npm run dev` failed with EADDRINUSE
+  with nothing pointing at phantom. It is the documented *success* path: "still running
+  counts as fixed" means the timeout fires every time a long-lived command is repaired.
+- **`git clean -fd` destroyed untracked work.** Phantom tells the user their branch is
+  untouched, which invites them to keep working, and there is one working tree — so a file
+  created during a run looked exactly like one the session created, and Ctrl+C deleted it
+  with no reflog to recover from. Untracked files are now rescued into a stash first, and
+  phantom prints the command that brings them back.
+- **The status line claimed to be fixing crashes phantom had refused.** `announceCrash`
+  ran before the refusal check, so a declined crash still logged an event — and since no
+  recovery event follows, the status line showed "fixing …" for twenty minutes and the
+  plugin briefed Claude to look for a fix branch that was never created.
+- **Reports were written non-atomically**, so a reader could catch a half-written file and
+  a Ctrl+C inside the write destroyed the post-mortem. Written and renamed now.
+- **Banner borders were misaligned** wherever an emoji appeared — which is every status
+  line phantom prints — because width was measured in UTF-16 code units rather than
+  terminal columns.
+- **Every run printed its outcome twice**: the banner, then the identical sentence again.
+- The headless session and both verification runs now spawn with `windowsHide`, so a
+  Windows recovery no longer flashes console windows.
+
+### Added
+
+- **`keepReports` (default 50).** Nothing pruned `.phantom/crashes/` or `.phantom/reports/`,
+  and each crash JSON carries the full context up to `ringBufferBytes`. The newest are
+  kept; `0` keeps everything.
+- **A `pack-smoke` CI job** on all three platforms, pinned to Node **18.0.0** rather than
+  the floating `18` that resolves to 18.20.x. It packs the tarball, installs it into a
+  path with a space and a non-ASCII character, asserts every runtime file dependency
+  resolves from what `files` actually shipped, and runs phantom inside a git worktree.
+  Those are the classes the existing matrix structurally cannot catch — and they are
+  exactly how `plugin/` went missing from the tarball for four releases.
+
+### Documentation
+
+Every claim below was false, stale, or unverifiable against the code:
+
+- **"the redacted last 256 KiB of output"** — the session sees the last 200 lines capped
+  at **24 KiB**. 256 KiB is what phantom *retains*. Off by ~10× on the central promise.
+- **The example banner and post-mortem were fabricated** — wrong header, wrong row order,
+  `merge`/`discard` instead of `accept`/`reject`, and a three-column table phantom has
+  never emitted, all labelled "from `examples/crash-demo`". Replaced with real output.
+- The README contradicted itself on the macOS notification permission; `.phantomrc` is
+  read from the working directory first and not merged; `--max-turns` is a third hard cap
+  nothing mentioned; exit codes 126, 127, 129 and 143 were missing; the allow and deny
+  tables were both incomplete while reading as exhaustive.
+- The site advertised a Windows guard hole that 0.3.5 closed, and printed a `.phantomrc`
+  panel that omitted `verifyCommand` and showed `testCommand` at a default it does not have.
+
 ## [0.4.0] - 2026-08-22
 
 Continues the audit that produced 0.3.6, taking the two findings that were held back
@@ -375,7 +471,8 @@ has a regression test, and every test was mutation-checked against the 0.3.5 beh
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/waazy-w/claude-phantom/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/waazy-w/claude-phantom/compare/v0.3.4...v0.3.5

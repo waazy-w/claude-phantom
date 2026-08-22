@@ -19,6 +19,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']);
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -216,7 +218,13 @@ function hitsNeverTouch(view, globs, isNeverTouch) {
 function tokenizeCommand(command, platform = process.platform) {
   const strip = (t) => t.replace(/^>+|^<+/, '').replace(/^\d*>+/, '');
   const out = [];
-  for (const raw of String(command).split(/[\s;&|()`]+/)) {
+  // `<` and `>` are separators, not ordinary characters. Without them in the
+  // split class a redirect written without a space -- `cat<.env`, `cat 0<.env`,
+  // `echo pwned>.env` -- produced one token like `cat<.env`, which matched no
+  // never-touch glob and no path, so the guard allowed it. The spaced forms
+  // were caught all along, which is what made the gap easy to miss. The write
+  // form is the dangerous one: it destroys a gitignored .env outright.
+  for (const raw of String(command).split(/[\s;&|()`<>]+/)) {
     const unescaped = strip(raw.replace(/["'\\]/g, ''));
     if (unescaped) out.push(unescaped);
     if (platform === 'win32') {
@@ -227,14 +235,44 @@ function tokenizeCommand(command, platform = process.platform) {
   return out;
 }
 
-/** Expand a single-segment shell glob (`.env*`, `conf/*.pem`) against the filesystem. */
+/**
+ * Shell-glob semantics, for deciding what a token could match ON DISK.
+ *
+ * Deliberately not the never-touch matcher: that one escapes `[` and `]`,
+ * because a never-touch rule naming a literal bracket is likelier than one
+ * wanting a character class. Reusing it here meant `.[e]nv` compiled to
+ * /^\.\[e\]nv$/ and matched neither the file on disk nor the `.env` rule --
+ * so `cat .[e]nv` was allowed, and the shell then expanded it and printed the
+ * secret. Expansion has to follow the shell's rules, not the rule file's.
+ */
+function shellGlobToRegExp(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') { re += '[^/]*'; continue; }
+    if (c === '?') { re += '[^/]'; continue; }
+    if (c === '[') {
+      const end = glob.indexOf(']', i + 1);
+      if (end === -1) { re += '\\['; continue; }
+      let body = glob.slice(i + 1, end);
+      if (body.startsWith('!')) body = '^' + body.slice(1);
+      re += '[' + body.replace(/\\/g, '\\\\') + ']';
+      i = end;
+      continue;
+    }
+    re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$');
+}
+
+/** Expand a single-segment shell glob (`.env*`, `conf/*.pem`, `.[e]nv`) against the filesystem. */
 function expandGlob(cwd, tok) {
   const dir = path.dirname(tok);
   const base = path.basename(tok);
   if (!/[*?[]/.test(base) || /[*?[]/.test(dir)) return [];
   let matcher;
   try {
-    matcher = (loadMatcher() === fallbackIsNeverTouch ? fallbackGlobToRegExp : require('./never-touch').globToRegExp)(base);
+    matcher = shellGlobToRegExp(base);
   } catch {
     return [];
   }
@@ -317,7 +355,171 @@ function checkBash(input, guard, isNeverTouch) {
       }
     }
   }
-  if (/(?:^|\s)>{1,2}\s*\S*\.env\b/i.test(command)) return 'redirect into .env';
+  if (/>{1,2}\s*['"]?\S*\.env\b/i.test(command)) return 'redirect into .env';
+
+  const bulk = bulkReadReason(command, guard, isNeverTouch);
+  if (bulk) return bulk;
+
+  const outside = readsOutsideRepo(command, guard.cwd);
+  if (outside) return 'command reads outside the repository: ' + outside;
+
+  return null;
+}
+
+/**
+ * Commands that read many files without ever naming one.
+ *
+ * The path checks above are lexical: they can only refuse a path that appears
+ * in the command line. `grep -r . .`, `git log -p`, `git show HEAD:.env`,
+ * `find . -exec cat {} +` and `tar cf - .` all read every file in the repo --
+ * including a gitignored `.env` and anything under `secrets/` -- while naming
+ * none of them, and `Bash(grep *)`, `Bash(git log *)` and `Bash(git show *)`
+ * are all on the allowlist. Verified in a sandbox: `grep -rs . .` printed the
+ * AWS key, and `git log -p` printed it out of history.
+ *
+ * These are refused wholesale rather than parsed for safety. A recursive
+ * content sweep is not something a crash fix needs, and Read/Grep -- which the
+ * guard can actually inspect, and which are already allowlisted -- do the same
+ * job under supervision.
+ */
+const BULK_READERS = [
+  [/(?:^|[|;&\s])find\b[^|;&]*-(?:exec|execdir|ok)\b/, 'find -exec runs a command over every match'],
+  [/(?:^|[|;&\s])(?:tar|zip|7z|rar)\b/, 'archiving reads whole directories'],
+  [/(?:^|[|;&\s])(?:base64|xxd|od|strings)\b/, 'binary dump can smuggle file contents'],
+  [/(?:^|[|;&\s])xargs\b/, 'xargs runs a command over a list this guard cannot see'],
+  [/(?:^|[|;&\s])git\s+cat-file\b/, 'git cat-file reads blobs directly'],
+];
+
+/**
+ * A recursive content search, and the roots it would walk.
+ *
+ * Short flags bundle, so `-rs` is -r and -s and an `\b` after the r never
+ * matches: `grep -rs . .` was the exact command that printed the AWS key out of
+ * a sandbox .env.
+ *
+ * @returns {string[]|null} search roots (repo-relative or absolute), or null
+ */
+function recursiveSearchRoots(command) {
+  const m = /(?:^|[|;&\s])(?:grep|rg|ag|ack)\b([^|;&]*)/.exec(command);
+  if (!m) return null;
+  const rest = m[1];
+  if (!/\s--recursive\b|\s-[a-zA-Z]*[rR]/.test(rest)) return null;
+  const args = rest.split(/\s+/).filter(Boolean).filter((a) => !a.startsWith('-'));
+  // grep RECURSIVE takes PATTERN then paths; with no path it walks the cwd.
+  const roots = args.slice(1).map((a) => a.replace(/^["']|["']$/g, ''));
+  return roots.length ? roots : ['.'];
+}
+
+const WALK_BUDGET = 20000;
+const WALK_DEPTH = 12;
+
+/**
+ * Does any never-touch file live under `dir`?
+ *
+ * This is what makes the recursive-search check scope-aware instead of a flat
+ * ban. `grep -rn TODO src` cannot reach a root-level .env and is exactly the
+ * kind of search a fix session legitimately runs, so refusing it would push the
+ * session toward worse tools for no safety gain. `grep -r . .` walks the repo
+ * root, where .env and secrets/ live, and is refused.
+ */
+function neverTouchUnder(cwd, dir, globs, isNeverTouch) {
+  const base = path.resolve(cwd, dir);
+  let budget = WALK_BUDGET;
+  const walk = (abs, depth) => {
+    if (depth > WALK_DEPTH || budget <= 0) return false;
+    let entries;
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch { return false; }
+    for (const ent of entries) {
+      if (--budget <= 0) return false;
+      const full = path.join(abs, ent.name);
+      const rel = path.relative(cwd, full).replace(/\\/g, '/');
+      if (ent.isDirectory()) {
+        if (ent.name === '.git' || ent.name === 'node_modules') continue;
+        if (isNeverTouch(rel + '/', globs) || isNeverTouch(rel, globs)) return true;
+        if (walk(full, depth + 1)) return true;
+        continue;
+      }
+      if (isNeverTouch(rel, globs)) return true;
+    }
+    return false;
+  };
+  try {
+    if (!fs.statSync(base).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  return walk(base, 0);
+}
+
+/** Tracked files that match a never-touch glob -- what `git log -p` could expose. */
+function trackedNeverTouch(cwd, globs, isNeverTouch) {
+  try {
+    const out = spawnSync('git', ['ls-files'], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (out.status !== 0 || !out.stdout) return false;
+    return out.stdout.split('\n').some((f) => f && isNeverTouch(f.trim(), globs));
+  } catch {
+    return false;
+  }
+}
+
+function bulkReadReason(command, guard, isNeverTouch) {
+  for (const [re, why] of BULK_READERS) {
+    if (re.test(command)) return 'bulk read refused — ' + why + ': ' + command.slice(0, 120);
+  }
+  const globs = (guard && guard.neverTouch) || [];
+  const cwd = (guard && guard.cwd) || process.cwd();
+
+  const roots = recursiveSearchRoots(command);
+  if (roots && roots.some((r) => neverTouchUnder(cwd, r, globs, isNeverTouch))) {
+    return 'bulk read refused — a recursive search of ' + roots.join(', ')
+      + ' would read never-touch files (narrow the path, or use the Grep tool): ' + command.slice(0, 120);
+  }
+
+  // `git show <rev>:<path>` names its path after a colon, where the tokenizer
+  // never sees it as a path at all -- `git show HEAD:.env` read the secret
+  // straight out of history.
+  const showPath = /(?:^|[|;&\s])git\s+show\s+[^\s|;&]*:([^\s|;&]+)/.exec(command);
+  if (showPath && isNeverTouch(showPath[1].replace(/^\.?\//, ''), globs)) {
+    return 'bulk read refused — git show reads that file out of history: ' + showPath[1];
+  }
+
+  // Patch output and git grep expose file CONTENT, so they only matter when the
+  // repo actually tracks something never-touch (a committed *.pem, say).
+  if (/(?:^|[|;&\s])git\s+(?:log|show|diff)\b[^|;&]*\s-p\b/.test(command)
+      || /(?:^|[|;&\s])git\s+grep\b/.test(command)) {
+    if (trackedNeverTouch(cwd, globs, isNeverTouch)) {
+      return 'bulk read refused — this repository tracks never-touch files and that command prints their contents: ' + command.slice(0, 120);
+    }
+  }
+  return null;
+}
+
+/**
+ * Any absolute or home-relative path in the command that leaves the repo.
+ *
+ * `checkFile` hard-denies an escaping path for every file tool, but `checkBash`
+ * only glob-tested them -- so `cat ~/.ssh/id_rsa`, `cat ~/.aws/credentials` and
+ * `cat /etc/passwd` were allowed through Bash while the Read tool refused the
+ * same paths, and the prompt's instruction to "work only inside the repository"
+ * was not enforced on the one tool that could ignore it. `~` was never expanded
+ * either, so it was missed twice over.
+ *
+ * @returns {string|null} the offending token
+ */
+function readsOutsideRepo(command, cwd) {
+  const home = os.homedir();
+  for (const tok of tokenizeCommand(command)) {
+    if (!tok || tok.startsWith('-')) continue;
+    let candidate = tok;
+    if (candidate === '~' || candidate.startsWith('~/') || candidate.startsWith('~\\')) {
+      if (!home) continue;
+      candidate = path.join(home, candidate.slice(1));
+    } else if (!path.isAbsolute(candidate)) {
+      continue;
+    }
+    const views = pathViews(cwd, candidate);
+    if (views.some((v) => v.escapes)) return tok;
+  }
   return null;
 }
 
@@ -358,4 +560,4 @@ if (require.main === module) {
   main().catch((err) => fail('internal error: ' + (err && err.message)));
 }
 
-module.exports = { DANGEROUS, DRY_RUN_WRITERS, dryRunWriteReason, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob };
+module.exports = { DANGEROUS, DRY_RUN_WRITERS, dryRunWriteReason, BULK_READERS, bulkReadReason, recursiveSearchRoots, neverTouchUnder, readsOutsideRepo, shellGlobToRegExp, tokenizeCommand, checkBash, checkFile, fallbackIsNeverTouch, pathViews, expandGlob };

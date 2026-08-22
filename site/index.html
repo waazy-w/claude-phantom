@@ -698,11 +698,11 @@ footer a:hover { color: var(--accent-text); }
         <p class="cta-note rv" style="margin-top:10px;text-align:left">or <a href="#install">install from GitHub</a> — <code>npm i -g github:waazy-w/claude-phantom</code></p>
 
         <div class="badges rv">
-          <span class="badge">v<b>0.4.0</b></span>
+          <span class="badge">v<b>0.5.0</b></span>
           <span class="badge">dependencies <b>0</b></span>
           <span class="badge">node <b>&gt;=18</b></span>
           <span class="badge">MIT</span>
-          <span class="badge">325 tests</span>
+          <span class="badge">339 tests</span>
         </div>
       </div>
 
@@ -875,36 +875,44 @@ footer a:hover { color: var(--accent-text); }
     <div class="split">
       <div class="rv">
         <div class="slab-label">on your original branch</div>
-<pre><span class="grn">phantom: ✅ FIXED</span> on phantom/fix-typeerror-…-k3f9a2
-  <span class="dim">report </span>  .phantom/reports/20260820-184107-…md
-  <span class="dim">review </span>  git diff main..phantom/fix-…-k3f9a2
-  <span class="dim">merge  </span>  git merge phantom/fix-…-k3f9a2
-  <span class="dim">discard</span>  git branch -D phantom/fix-…-k3f9a2
-  <span class="dim">session</span>  192389b5-e0e9-4c66-a16c-a1a9d4f1cd4b
+<pre><span class="dim">╭────────────────────────────────────────────────╮</span>
+<span class="dim">│</span> <span class="grn">👻 phantom ✅ fixed</span> · 1m 48s · 34.1k tokens    <span class="dim">│</span>
+<span class="dim">│</span> fix verified by phantom: tests pass and the    <span class="dim">│</span>
+<span class="dim">│</span> command no longer crashes; your branch is      <span class="dim">│</span>
+<span class="dim">│</span> unchanged                                      <span class="dim">│</span>
+<span class="dim">│</span>                                                <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">branch </span> phantom/fix-typeerror-…-k3f9a           <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">review </span> git diff main..phantom/fix-…-k3f9a      <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">accept </span> git merge phantom/fix-…-k3f9a           <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">reject </span> git branch -D phantom/fix-…-k3f9a       <span class="dim">│</span>
+<span class="dim">│</span>                                                <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">report </span> .phantom/reports/20260820-184107-…md    <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">session</span> 192389b5-…  (claude --resume 192389b5-…)<span class="dim">│</span>
+<span class="dim">╰────────────────────────────────────────────────╯</span>
 
 <span class="dim">phantom ›</span> merge into <span class="wht">main</span>, delete it, or keep it for later? <span class="dim">[m/d/k]</span></pre>
         <p class="demo-cap">In a terminal it asks; in a pipe, in CI, or under <code>--no-prompt</code> it just prints the commands and exits. Every non-answer — Ctrl+C, EOF, a timeout — leaves the branch untouched. Exit code is always your command's: a fixed crash is still exit 1, so phantom is safe in scripts and <code>&amp;&amp;</code> chains.</p>
       </div>
       <div class="rv">
         <div class="slab-label">.phantom/reports/*.md</div>
-<pre><span class="wht"># Post-mortem: TypeError: Cannot read
-# properties of undefined (reading 'email')</span>
-<span class="dim">Status: ✅ FIXED   Iterations: 1/3   1m 48s</span>
+<pre><span class="wht"># 👻 Phantom post-mortem — TypeError: Cannot
+# read properties of undefined (reading 'email')</span>
 
-<span class="wht">## Root cause</span>
-<span class="key">formatOrderLine</span> in src/report.js:9 dereferences
-order.customer.email unconditionally; a guest
-checkout in data/orders.json has no customer.
+<span class="dim">&gt;</span> <span class="wht">**Status:**</span> ✅ FIXED
 
-<span class="wht">## Fix</span>
-<span class="red">-  const email = order.customer.email;</span>
-<span class="grn">+  const email = order.customer?.email ?? '(guest)';</span>
+<span class="wht">## TL;DR</span>
+<span class="key">formatOrderLine</span> dereferenced order.customer.email
+unconditionally, and a guest checkout in
+data/orders.json has no customer. Optional
+chaining with a (guest) fallback; test added.
 
 <span class="wht">## Verification (independent)</span>
-Reproduce (pre-fix)  npm test   <span class="red">❌ 1 failed</span>
-Verify (post-fix)    npm test   <span class="grn">✅ 5 passed</span>
-Original command     npm start  <span class="grn">✅ exit 0</span>
-<span class="dim">Never-touch audit: clean</span></pre>
+Tests run by phantom     <span class="grn">✅ passed — npm test</span>
+Crashed command re-run   <span class="grn">✅ exits 0 — npm start</span>
+Files changed            src/report.js,
+                         test/report.test.js
+Never-touch audit        <span class="grn">✅ clean</span>
+Wall clock               1m 48s</pre>
         <p class="demo-cap">The verification table and metadata are written by phantom, not the session.</p>
       </div>
     </div>
@@ -941,7 +949,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
       <div class="rv">
         <div class="slab-label">.phantomrc — every key at its default</div>
 <pre>{
-  <span class="key">"testCommand"</span>:     "npm test",
+  <span class="key">"testCommand"</span>:     null,   <span class="dim">// auto: "npm test"</span>
   <span class="key">"maxIterations"</span>:   3,
   <span class="key">"maxMinutes"</span>:      15,
   <span class="key">"neverTouch"</span>:      [".env", ".env.*", "**/*.pem",
@@ -952,8 +960,10 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   <span class="key">"model"</span>:           null,
   <span class="key">"autoCommit"</span>:      true,
   <span class="key">"promptOnFinish"</span>:  true,
+  <span class="key">"verifyCommand"</span>:   true,   <span class="dim">// re-run the crashed command</span>
   <span class="key">"reportDir"</span>:       ".phantom/reports",
   <span class="key">"ringBufferBytes"</span>: 262144,
+  <span class="key">"keepReports"</span>:     50,     <span class="dim">// 0 keeps everything</span>
   <span class="key">"claudeBin"</span>:       "claude"
 }</pre>
       </div>
@@ -964,12 +974,13 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
             <tbody>
               <tr><td class="f">your code</td><td>Always. A fixed crash is still exit 1.</td></tr>
               <tr><td class="f">128 + sig</td><td>Signal deaths, like a shell. SIGSEGV → 139.</td></tr>
-              <tr><td class="f">130</td><td>Ctrl+C during recovery.</td></tr>
+              <tr><td class="f">127 / 126</td><td>Command not found / could not be spawned.</td></tr>
+              <tr><td class="f">130 / 143 / 129</td><td>Ctrl+C, SIGTERM, SIGHUP during recovery.</td></tr>
               <tr><td class="f">2</td><td>Invalid flags or config — before your command runs.</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="demo-cap" style="margin-top:14px">Config precedence: flags &gt; <code>.phantomrc</code> &gt; <code>package.json</code> &gt; defaults.</p>
+        <p class="demo-cap" style="margin-top:14px">Config precedence: flags &gt; <code>.phantomrc</code> &gt; <code>package.json</code> &gt; defaults. Both files are looked for in the directory you ran from first, then at the git root — first hit wins, no merging.</p>
       </div>
     </div>
   </div>
@@ -1074,7 +1085,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
       </details>
       <details>
         <summary>What can the session actually see?</summary>
-        <div class="a">Your tracked and untracked source minus never-touch globs, the redacted last 256 KiB of output, read-only git history, your <code>package.json</code> name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, or commit to your branch.</div>
+        <div class="a">Your tracked and untracked source minus never-touch globs, a redacted slice of the crash output (the last 200 lines, capped at 24 KiB — the 256 KiB ring buffer is what phantom <em>retains</em>, not what the session is shown), read-only git history, your <code>package.json</code> name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, or commit to your branch.</div>
       </details>
     </div>
   </div>
@@ -1149,7 +1160,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
             <button class="copy" data-c="c9">copy</button>
           </div>
         </div>
-        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 325 tests, no install step.</p>
+        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 339 tests, no install step.</p>
       </div>
 
       <div class="pane" id="pane-plugin" role="tabpanel" aria-labelledby="tab-plugin" hidden>
@@ -1177,7 +1188,7 @@ Original command     npm start  <span class="grn">✅ exit 0</span>
   <div class="wrap" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;width:100%">
     <div class="ghost-note">
       <svg viewBox="0 0 256 256" aria-hidden="true"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
-      <span>claude-phantom 0.4.0 — MIT</span>
+      <span>claude-phantom 0.5.0 — MIT</span>
     </div>
     <nav>
       <a href="https://github.com/waazy-w/claude-phantom">github</a>

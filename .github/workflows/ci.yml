@@ -23,3 +23,85 @@ jobs:
       # rather than after a release has shipped past them.
       - run: npm run check-site
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+
+  # What the matrix above structurally cannot catch, because it always runs the
+  # source tree from an ASCII, space-free path in a plain clone:
+  #   - the published artifact: `files` is only asserted as a string in
+  #     package.json, so `plugin/` once went missing from the tarball for four
+  #     releases and templates/ + brand/ are still only load-bearing at runtime
+  #   - paths with spaces or non-ASCII characters
+  #   - git worktrees, where .git is a file and phantom refused every crash
+  # Pinned to 18.0.0 rather than the floating 18, so the engines floor is
+  # honestly tested: `node-version: 18` resolves to 18.20.x, where APIs added
+  # after 18.0 (describe/it in node:test, for instance) would pass unnoticed.
+  pack-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.0.0
+      - run: git config --global user.name ci && git config --global user.email ci@example.com
+      - name: Pack the tarball
+        run: npm pack --pack-destination "${{ runner.temp }}"
+        shell: bash
+      - name: Install it into a path with a space and a non-ASCII character
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ runner.temp }}/Prôjects ÿ/repo dir"
+          mkdir -p "$dir"
+          cd "$dir"
+          git init -q .
+          npm init -y >/dev/null
+          npm i "${{ runner.temp }}"/claude-phantom-*.tgz
+      - name: Every runtime file dependency resolves from what `files` shipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/Prôjects ÿ/repo dir"
+          node -e "
+            const p = require('claude-phantom/src/prompt');
+            const r = require('claude-phantom/src/report');
+            const a = require('claude-phantom/src/announce');
+            if (!p.loadSkill()) throw new Error('plugin skill missing from the tarball');
+            if (!r.loadTemplate()) throw new Error('post-mortem template missing from the tarball');
+            if (!require('fs').existsSync(a.ICON)) throw new Error('notification icon missing from the tarball');
+          "
+      - name: The bins run from that path
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/Prôjects ÿ/repo dir"
+          npx phantom --version
+          echo '{}' | npx phantom-status
+      - name: Phantom is usable inside a git worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/Prôjects ÿ/repo dir"
+          # Committed BEFORE the worktree is made, so the worktree starts clean.
+          # Pointing claudeBin at nothing stops recovery right after the
+          # precondition checks, instead of starting a real (slow, billable)
+          # session if a `claude` happens to be on PATH.
+          echo '{"claudeBin":"phantom-no-such-claude"}' > .phantomrc
+          git add -A && git commit -qm init
+          git worktree add ../wt -b wt
+          cd ../wt
+          # .git is a FILE here; ensureExcluded used to throw ENOTDIR, swallow
+          # it, and leave .phantom/ making the tree permanently dirty -- so
+          # phantom refused every crash with "uncommitted changes", forever.
+          out="$(npx phantom node -e 'process.exit(1)' 2>&1 || true)"
+          echo "$out"
+          if echo "$out" | grep -q "uncommitted changes"; then
+            echo "::error::phantom refused a crash inside a worktree"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "claude CLI unavailable"; then
+            echo "::error::expected recovery to start and stop at the missing claude binary"
+            exit 1
+          fi

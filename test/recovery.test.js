@@ -958,3 +958,78 @@ test('a clean dry run is still reported as a clean dry run', async () => {
   assert.doesNotMatch(out, /supposed to change nothing/);
   assert.equal(sh(repo, ['status', '--porcelain']), '', 'and the tree really is clean');
 });
+
+test('old crash files and post-mortems are pruned, newest kept', async () => {
+  // Nothing pruned .phantom/crashes/ or .phantom/reports/: every crash wrote a
+  // JSON carrying the whole context (tail included, up to ringBufferBytes) plus
+  // a post-mortem, and a month of a crashy dev loop left hundreds of them.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { keepReports: 3, maxIterations: 1 });
+  const crashDir = path.join(repo, '.phantom', 'crashes');
+  const reportDir = path.join(repo, '.phantom', 'reports');
+  fs.mkdirSync(crashDir, { recursive: true });
+  fs.mkdirSync(reportDir, { recursive: true });
+  // Filenames are <timestamp>-<slug>, so a lexical sort is chronological.
+  for (let i = 0; i < 10; i++) {
+    fs.writeFileSync(path.join(crashDir, '2020010' + i + '-000000-old.json'), '{}');
+    fs.writeFileSync(path.join(reportDir, '2020010' + i + '-000000-old.md'), '# old');
+  }
+  fs.writeFileSync(path.join(reportDir, 'notes.txt'), 'not a report; leave it alone');
+
+  const ctx = makeCtx(repo, config);
+  const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+  assert.equal(res.status, 'fixed', res.message);
+
+  const crashes = fs.readdirSync(crashDir).filter((f) => f.endsWith('.json')).sort();
+  const reports = fs.readdirSync(reportDir).filter((f) => f.endsWith('.md')).sort();
+  assert.equal(crashes.length, 3, 'crash JSONs pruned to keepReports');
+  assert.equal(reports.length, 3, 'reports pruned to keepReports');
+  // The run's own files are the newest, so they must be among the survivors.
+  assert.ok(reports.includes(path.basename(res.reportPath)), 'this run\'s report survived');
+  // Survivors are the lexically-largest names: the two newest seeded files plus
+  // this run's own. 20200100..20200107 are the ones that had to go.
+  assert.deepEqual(crashes.slice(0, 2), ['20200108-000000-old.json', '20200109-000000-old.json'],
+    'the oldest went first: ' + crashes.join(', '));
+  assert.ok(fs.existsSync(path.join(reportDir, 'notes.txt')), 'unrelated files are left alone');
+});
+
+test('keepReports: 0 keeps everything', async () => {
+  const repo = makeRepo();
+  const config = makeConfig(repo, { keepReports: 0, maxIterations: 1 });
+  const reportDir = path.join(repo, '.phantom', 'reports');
+  fs.mkdirSync(reportDir, { recursive: true });
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(reportDir, '2020010' + i + '-000000-old.md'), '# old');
+  const ctx = makeCtx(repo, config);
+  await runRecovery(ctx, config, {}, { env: scenarioEnv('fix'), exit: () => {} });
+  assert.equal(fs.readdirSync(reportDir).filter((f) => f.endsWith('.md')).length, 6, 'nothing pruned');
+});
+
+test('aborting rescues untracked work instead of deleting it', async () => {
+  // cleanup() runs `git clean -fd`, which is unrecoverable: content that was
+  // never added has no reflog entry. Phantom tells the user their own branch is
+  // untouched, which invites them to keep working while a recovery runs -- and
+  // there is only one working tree, so a file they create during the run looks
+  // exactly like one the session created. It was simply gone after a Ctrl+C.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxMinutes: 5 });
+  const ctx = makeCtx(repo, config);
+  let ctl;
+  const promise = runRecovery(ctx, config, {}, { env: scenarioEnv('sleep'), exit: () => {}, onStart: (c) => { ctl = c; } });
+  await new Promise((r) => setTimeout(r, 900));
+
+  // The user, in another window, while phantom works.
+  fs.writeFileSync(path.join(repo, 'my-new-file.js'), 'work I just started\n');
+
+  const { result: res, out } = await withOutput(async () => {
+    await ctl.abort('SIGINT');
+    return promise;
+  });
+  assert.equal(res.status, 'aborted');
+  assert.ok(!fs.existsSync(path.join(repo, 'my-new-file.js')), 'the tree really was cleaned');
+
+  const hint = /git stash apply ([0-9a-f]{10})/.exec(out);
+  assert.ok(hint, 'phantom said where the file went: ' + out);
+  execFileSync('git', ['stash', 'apply', hint[1]], { cwd: repo, stdio: 'pipe' });
+  assert.equal(fs.readFileSync(path.join(repo, 'my-new-file.js'), 'utf8'), 'work I just started\n',
+    'and the command it printed brings the work back');
+});

@@ -26,6 +26,7 @@ test('defaults match the design doc', () => {
     reportDir: '.phantom/reports',
     ringBufferBytes: 262144,
     claudeBin: 'claude',
+    keepReports: 50,
     alwaysNeverTouch: ['.git/**', 'node_modules/**'],
   });
   assert.deepStrictEqual(cfg.loadedFrom, []);
@@ -92,4 +93,35 @@ test('malformed files and non-object config are rejected', () => {
   fs.unlinkSync(path.join(dir, '.phantomrc'));
   write(dir, 'package.json', { phantom: 'x' });
   assert.throws(() => loadConfig(dir), /"phantom" field must be a JSON object/);
+});
+
+test('reportDir cannot carry shell metacharacters or escape the repository', () => {
+  // reportDir is interpolated into the guard hook's command line on Windows,
+  // where arguments are quoted but not escaped -- so a `.phantomrc` reading
+  // `.phantom/reports" & calc & "` ran calc on every PreToolUse hook. It is
+  // also joined into paths, so `..` would put phantom's own files outside the
+  // repository it is allowed to touch. It was validated only as "a non-empty
+  // string".
+  for (const bad of [
+    '.phantom/reports" & calc & "',
+    ".phantom/reports' ; rm -rf / ; '",
+    '.phantom/$(whoami)',
+    '../../etc',
+    '.phantom/../../..',
+    '/tmp/absolute',
+  ]) {
+    assert.throws(() => loadConfig(tmp(), { reportDir: bad }), /reportDir must/, JSON.stringify(bad));
+  }
+  // Ordinary relative directories keep working, nested ones included.
+  for (const good of ['.phantom/reports', 'reports', 'build/phantom/reports', '.phantom/reports/']) {
+    assert.equal(loadConfig(tmp(), { reportDir: good }).reportDir, good);
+  }
+});
+
+test('keepReports is validated like the other bounded integers', () => {
+  assert.equal(loadConfig(tmp(), { keepReports: 5 }).keepReports, 5);
+  assert.equal(loadConfig(tmp(), { keepReports: 0 }).keepReports, 0, '0 disables pruning');
+  assert.throws(() => loadConfig(tmp(), { keepReports: -1 }), /keepReports/);
+  assert.throws(() => loadConfig(tmp(), { keepReports: 99999 }), /keepReports/);
+  assert.throws(() => loadConfig(tmp(), { keepReports: 'lots' }), /keepReports/);
 });

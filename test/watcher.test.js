@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Writable } = require('node:stream');
 const { spawn } = require('node:child_process');
-const { runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS, windowsSafeSpawn, escapeArgForCmd } = require('../src/watcher');
+const { runCommand, exitCodeFor, SpawnError, FORWARDED_SIGNALS, killTreeByPid, windowsSafeSpawn, escapeArgForCmd } = require('../src/watcher');
 const { extractStackTrace, detectCrash } = require('../src/crash');
 
 const node = process.execPath;
@@ -281,4 +281,35 @@ test('a consumer that quits early does not strand the child (phantom -- cmd | he
   assert.ok(Date.now() - started < 20000, 'and settled promptly');
   // The tail is still captured: we stopped writing to the dead consumer, not reading.
   assert.ok(r.tail.includes('line 0') || r.tail.includes('line '), 'output still reached the ring buffer');
+});
+
+test('killTreeByPid takes the whole process group, not just the direct child', { skip: noSignals }, async () => {
+  // spawnSync's own `timeout` signals the direct child ONLY. For `npm run dev`
+  // that is npm, not the node server it started -- which keeps running and
+  // keeps its port, so the user's next real `npm run dev` fails with EADDRINUSE
+  // and nothing points at phantom. It happens on the documented SUCCESS path,
+  // because "still running counts as fixed" means the timeout fires every time
+  // a long-lived command is repaired.
+  const { spawnSync } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-orphan-'));
+  const marker = path.join(dir, 'grandchild-alive');
+  fs.writeFileSync(path.join(dir, 'child.js'),
+    'const fs=require("node:fs");setInterval(()=>fs.writeFileSync(' + JSON.stringify(marker) + ',String(Date.now())),50);');
+  fs.writeFileSync(path.join(dir, 'parent.js'),
+    'require("node:child_process").spawn(process.execPath,[' + JSON.stringify(path.join(dir, 'child.js')) + '],{stdio:"ignore"});setInterval(()=>{},1000);');
+
+  const r = spawnSync(node, [path.join(dir, 'parent.js')], {
+    cwd: dir, encoding: 'utf8', timeout: 1200, stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  assert.ok(r.error && r.error.code === 'ETIMEDOUT', 'precondition: the run timed out');
+  killTreeByPid(r.pid);
+
+  // The grandchild keeps stamping a file while alive; if the tree really died,
+  // the stamp stops changing.
+  await new Promise((r2) => setTimeout(r2, 400));
+  const first = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : null;
+  await new Promise((r2) => setTimeout(r2, 400));
+  const second = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : null;
+  assert.strictEqual(first, second, 'the grandchild is gone, not still writing');
 });

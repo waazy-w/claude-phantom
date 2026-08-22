@@ -147,6 +147,28 @@ const restorePaths = (files, opts) => {
 /** `git clean -fd` (never -x: ignored files such as .env are left alone). */
 const cleanUntracked = (opts) => run(['clean', '-fd'], opts).ok;
 
+/** @returns {string[]} untracked, non-ignored files */
+const untrackedFiles = (opts) => {
+  const out = git(['ls-files', '--others', '--exclude-standard'], opts);
+  return out ? out.split('\n').filter(Boolean) : [];
+};
+
+/**
+ * Stash the named paths (untracked ones included) and return the stash sha.
+ *
+ * Used to rescue untracked files before `git clean -fd` removes them. `clean`
+ * is unrecoverable -- content that was never added has no reflog entry -- so
+ * anything the user created while phantom was running was simply gone after a
+ * Ctrl+C. A stash is recoverable and costs one entry.
+ * @returns {string|null}
+ */
+const stashPaths = (message, files, opts) => {
+  if (!files || !files.length) return null;
+  const r = run(['stash', 'push', '-u', '-m', message, '--', ...files], opts);
+  if (!r.ok || /No local changes to save/.test(r.stdout)) return null;
+  return git(['rev-parse', '--verify', '--quiet', 'stash@{0}'], opts) || null;
+};
+
 /** @returns {string[]} files changed since `sha` plus untracked files, sorted unique */
 const changedFilesSince = (sha, opts) => {
   const diff = git(['diff', '--name-only', sha], opts);
@@ -217,6 +239,6 @@ function ensureExcluded(root, dir, opts = {}) {
 
 module.exports = {
   git, isRepo, root, headSha, currentBranch, status, isDirty, recentCommits,
-  createBranch, checkout, stashPush, stashPop, stashExists, stashIndexOf, resetHard, restorePaths, cleanUntracked,
+  createBranch, checkout, stashPush, stashPop, stashExists, stashIndexOf, resetHard, restorePaths, cleanUntracked, untrackedFiles, stashPaths,
   changedFilesSince, branchExists, isTracked, deleteBranch, mergeBranch, commitAll, ensureExcluded };
 

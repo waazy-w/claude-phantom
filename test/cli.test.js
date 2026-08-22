@@ -138,7 +138,22 @@ test('main: crash prints the banner, hands off to recovery, and keeps the child 
     assert.strictEqual(evs[0].type, 'crash');
     assert.strictEqual(evs[0].error, 'RangeError: out of cheese');
     assert.ok(text.includes('╭') && text.includes('╰'));
-    assert.ok(text.includes('phantom › fixed: done'));
+    // runRecovery prints the banner that states the outcome, and it is the last
+    // thing the user reads; the CLI used to repeat the identical sentence
+    // underneath it on every single run. Statuses that do get a banner are
+    // therefore not echoed here.
+    assert.ok(!text.includes('phantom › fixed: done'), 'the outcome is not printed twice');
+
+    // A status with no banner behind it -- an early refusal -- still needs the
+    // CLI to say something, or the run ends in silence.
+    const refusedErr = capture();
+    ui.setStream(refusedErr);
+    await main([node, 'crash.js'], {
+      cwd: dir, stdout: capture(), stderr: capture(),
+      recovery: { runRecovery: async () => ({ status: 'refused', message: 'nothing to go on' }) },
+    });
+    assert.ok(refusedErr.text().includes('refused: nothing to go on'), refusedErr.text());
+    ui.setStream(phantomErr);
 
     const code2 = await main([node, 'crash.js'], {
       cwd: dir, stdout: capture(), stderr: capture(),

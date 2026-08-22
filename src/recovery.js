@@ -13,7 +13,7 @@ const report = require('./report');
 const prompt = require('./prompt');
 const { isNeverTouch } = require('./never-touch');
 const audit = require('./audit');
-const { windowsSafeSpawn, killTree } = require('./watcher');
+const { windowsSafeSpawn, killTree, killTreeByPid } = require('./watcher');
 const { summarizeExit } = require('./crash');
 
 const { log, colors } = ui;
@@ -88,6 +88,9 @@ function runClaude(opts) {
     cwd: opts.cwd,
     env: opts.env,
     stdio: ['pipe', 'pipe', opts.verbose ? 'inherit' : 'pipe'],
+    // Without this a Windows recovery flashes a console window for the headless
+    // session; watcher.js sets it for the wrapped command and these did not.
+    windowsHide: true,
     ...winOpts,
   });
   const promise = new Promise((resolve) => {
@@ -138,9 +141,20 @@ function reproduce(ctx, { cwd, env, timeoutMs }) {
   const { file, argv, opts: winOpts } = windowsSafeSpawn(ctx.command, ctx.args || [], cwd, env);
   const r = spawnSync(file, argv, {
     cwd, env, encoding: 'utf8', timeout: Math.max(1000, timeoutMs),
-    maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], ...winOpts,
+    maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    // Own process group, so the timeout below can take the whole tree with it.
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+    ...winOpts,
   });
   const stillRunning = Boolean(r.error && r.error.code === 'ETIMEDOUT');
+  // spawnSync's timeout signals the direct child only. For `npm run dev` that
+  // is npm, not the node server it started -- which keeps running, keeps its
+  // port, and makes the user's next real `npm run dev` fail with EADDRINUSE
+  // with nothing to connect it to phantom. This is the success path, not an
+  // edge case: "still running counts as fixed" means the timeout fires on every
+  // long-lived command phantom repairs.
+  if (stillRunning || r.error) killTreeByPid(r.pid);
   const output = [r.stdout, r.stderr].filter(Boolean).join('\n');
   return {
     fixed: stillRunning || r.status === 0,
@@ -158,10 +172,39 @@ function reproduce(ctx, { cwd, env, timeoutMs }) {
 function runTests(testCommand, { cwd, env, timeoutMs }) {
   const r = spawnSync(testCommand, {
     cwd, env, shell: true, encoding: 'utf8', timeout: Math.max(1000, timeoutMs), maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
   });
   const timedOut = Boolean(r.error && r.error.code === 'ETIMEDOUT');
+  // A test runner that spawns workers or a dev server leaves the same orphans.
+  if (timedOut || r.error) killTreeByPid(r.pid);
   const combined = [r.stdout, r.stderr, r.error && !timedOut ? String(r.error.message) : ''].filter(Boolean).join('\n');
   return { passed: r.status === 0 && !r.error, output: report.trimBytes(combined, TEST_TAIL_BYTES), code: r.status, timedOut };
+}
+
+/**
+ * Keep only the newest `keep` files in `dir`.
+ *
+ * Nothing pruned `.phantom/crashes/` or `.phantom/reports/`: every crash wrote
+ * a JSON carrying the whole context (tail included, up to ringBufferBytes) plus
+ * a post-mortem, and a month of a crashy dev loop left hundreds of them.
+ * Filenames are `<timestamp>-<slug>`, so a lexical sort is chronological.
+ *
+ * @returns {number} files removed
+ */
+function pruneDir(dir, keep, suffix) {
+  if (!Number.isFinite(keep) || keep <= 0) return 0;
+  let names;
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.endsWith(suffix)).sort();
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names.slice(0, Math.max(0, names.length - keep))) {
+    try { fs.unlinkSync(path.join(dir, name)); removed++; } catch { /* raced with another run */ }
+  }
+  return removed;
 }
 
 function phantomDirOf(reportDir) {
@@ -253,6 +296,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   };
   let iterations = 0;
   let testsPassed = null;
+  // cleanup() runs from signal handlers, so anything it needs must be resolved
+  // before the first await rather than deep inside the happy path.
+  const phantomDirName = phantomDirOf(config.reportDir);
   const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message, sessionId: s.sessionId || null });
 
   /**
@@ -267,7 +313,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   const bail = async (status, message) => {
     log.error(message);
     await cleanup('could not continue');
-    return result(status, message);
+    // Marked as already told to the user, so the CLI does not print the same
+    // sentence a second time underneath it.
+    return { ...result(status, message), reported: true };
   };
 
   const removeSignalHandlers = () => {
@@ -301,6 +349,18 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       // branch with a live stash and a half-written edit on disk.
       const failed = [];
       if (s.onPhantomBranch && s.baseSha) {
+        // `git clean -fd` is unrecoverable: untracked content was never added,
+        // so there is no reflog to get it back. Phantom tells the user their
+        // own branch is untouched, which invites them to keep working while a
+        // recovery runs -- and there is only one working tree, so a file they
+        // created during the run looks exactly like one the session created.
+        // Rescuing them into a stash first costs one entry and loses nothing.
+        const untracked = git.untrackedFiles(opts).filter((f) => !f.startsWith(phantomDirName + '/'));
+        if (untracked.length) {
+          const rescue = git.stashPaths('phantom-rescue-' + timestamp(), untracked, opts);
+          if (rescue) log.warn('rescued ' + untracked.length + ' untracked file(s) into a stash before cleaning: git stash apply ' + shortSha(rescue));
+          else log.warn('about to remove untracked files that could not be stashed: ' + untracked.join(', '));
+        }
         if (!git.resetHard(s.baseSha, opts)) failed.push('discard the session\'s changes');
         if (!git.cleanUntracked(opts)) failed.push('remove the files it created');
       }
@@ -633,7 +693,13 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
         ? (changedFiles.length ? 'STILL ON DISK — dry run has no branch to revert' : 'reverted in place; no branch was created')
         : (changedFiles.length ? 'revert FAILED — changes are still on the branch' : 'branch hard-reverted'),
     });
-    fs.writeFileSync(s.reportPath, md);
+    // Rename, not truncate-and-write: a reader (Claude, an editor, `cat`) could
+    // otherwise catch a half-written report, and a Ctrl+C or maxMinutes timeout
+    // landing inside the write destroyed the post-mortem outright. Measured at
+    // 19 partial and 14 empty reads out of 6340 against a 300 KB report.
+    const reportTmp = s.reportPath + '.' + process.pid + '.tmp';
+    fs.writeFileSync(reportTmp, md);
+    fs.renameSync(reportTmp, s.reportPath);
 
     // 9. Restore the user's world
     if (s.onPhantomBranch) {
@@ -685,6 +751,11 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
           : 'could not pop the stash automatically; run: ' + popHint(s));
       }
     }
+    // Housekeeping, after the report for this run is safely written.
+    const keep = Number(config.keepReports);
+    const pruned = pruneDir(crashDir, keep, '.json') + pruneDir(reportDirAbs, keep, '.md');
+    if (pruned) log.verbose('pruned ' + pruned + ' old crash file(s); keeping the newest ' + keep);
+
     s.done = true;
     removeSignalHandlers();
 
@@ -770,4 +841,4 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached })
   ui.banner(lines, { color });
 }
 
-module.exports = { runRecovery, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };
+module.exports = { runRecovery, pruneDir, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };
