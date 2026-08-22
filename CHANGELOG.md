@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-22
+
+Three event-log findings from the original audit that were never actually fixed — I
+reported the audit closed while these were still open.
+
+### Fixed
+
+- **A torn last line swallowed the next event.** `appendFileSync` concatenates onto
+  whatever is already there, so a log whose final line lost its newline — a writer killed
+  mid-write, a full disk — merged the next event into the broken one and left *both*
+  unparseable. The crash simply never reached Claude or the status line, and the log did
+  not self-heal until the next trim. The tail is checked and healed before appending now.
+- **One unreadable line replayed every event the user had already seen.** The cursor was a
+  bare event id, and `findIndex` returning `-1` was treated identically to "never
+  acknowledged anything" — so if the cursor's own line became unparseable while its
+  neighbours survived, the entire retained log came back as unread: a 200-event briefing
+  in the next prompt and `(+199)` on the status line. Measured at 39 already-seen events
+  replayed. The cursor records its timestamp now, so a missing id degrades to "newer than
+  the acknowledged time". The old single-field format is still understood.
+- The plugin's copy of the reader was updated to match. It ships without `src/` on disk,
+  so the two implementations have to agree on the cursor format or the plugin replays
+  everything.
+
+### Documentation
+
+- **The "not a sandbox" caveat says what actually happened.** It described the guard as
+  lexical without conveying what that costs: an audit found four ways past it in a single
+  afternoon. All four are fixed and pinned by tests, but a lexical guard is a speed bump
+  and a fifth way probably exists — the README says so now, and points at the backstops
+  that do not depend on parsing a command correctly.
+
+### Known limitation
+
+- **One cursor per repository.** With two Claude Code windows open on the same repo,
+  whichever prompts first consumes the crash notification and the other never sees it. A
+  per-session cursor would need matching state in the plugin's own copy of the reader and
+  a pruning story for abandoned sessions; it is recorded here rather than half-built.
+
 ## [0.6.0] - 2026-08-22
 
 Four new subcommands, an environment-variable config layer, and a spend ceiling — built
@@ -559,7 +597,8 @@ has a regression test, and every test was mutation-checked against the 0.3.5 beh
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/waazy-w/claude-phantom/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/waazy-w/claude-phantom/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...v0.4.0

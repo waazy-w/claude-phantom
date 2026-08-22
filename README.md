@@ -126,7 +126,11 @@ Nothing here trusts the agent's own word: phantom runs your test command itself,
 
 The session can see your tracked and untracked source (minus never-touch globs), a redacted slice of the crash output (the last 200 lines, capped at 24 KiB — `ringBufferBytes`, 256 KiB by default, is how much phantom *retains*, not how much the session is shown), read-only git history, `package.json` name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, run migrations, or commit to your branch.
 
-**Not a sandbox.** The session may run `node` (it has to, to run your tests), and a `node -e` one-liner can in principle read any file your user can read or open a socket. The guard is lexical; branch isolation, the post-session audit, and the no-push rule are the real backstops. Need hard isolation? Run phantom in a container.
+**Not a sandbox.** The session may run `node` (it has to, to run your tests), and a `node -e` one-liner can in principle read any file your user can read or open a socket.
+
+The guard is **lexical** — it inspects the text of a command, so it can only refuse what a command says, not what it does. Treat that as a real limit, not a formality: an audit in August 2026 found four ways past it in one afternoon (a recursive `grep` that names no path, `git show HEAD:.env`, a redirect written without a space, and a shell glob the matcher expanded differently from the shell). All four are fixed and have regression tests, and the ones that were only ever theoretical are refused now too — but the honest lesson is that a lexical guard is a speed bump, and a fifth way probably exists.
+
+The real backstops are the ones that do not depend on reading a command correctly: branch isolation, the post-session audit, and the no-push rule. Need hard isolation? Run phantom in a container.
 
 **Redaction.** The output tail *and the command line phantom displays* are scrubbed before anything sees them — the model's prompt, the post-mortem, the crash JSON, the desktop notification and the webhook payload (`KEY=value` with secret-looking names, quoted multi-word values, `Authorization` headers, `?api_key=`-style URL query credentials, `sk-`/`sk_`/`ghp_`/`AKIA`/`xox` tokens, JWTs, URL credentials, PEM blocks → `[REDACTED]`). The raw argv is kept only to re-run your command. Pattern-based, so a safety net, not a guarantee.
 

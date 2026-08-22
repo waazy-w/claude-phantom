@@ -131,6 +131,12 @@ function appendEvent(root, event, opts = {}) {
     //
     // A lone O_APPEND write is atomic against other appenders, so nothing is
     // lost and nothing interleaves. The cap is enforced separately, below.
+    // Heal a torn tail first. appendFileSync concatenates onto whatever is
+    // already there, so a file whose last line lost its newline -- a writer
+    // killed mid-write, a full disk -- merged the next event into the broken
+    // one and BOTH were then unparseable. The crash simply never reached Claude
+    // or the status line, and the log did not self-heal until the next trim.
+    if (endsMidLine(root)) fs.appendFileSync(eventsPath(root), '\n');
     fs.appendFileSync(eventsPath(root), JSON.stringify(full) + '\n');
     trimIfNeeded(root);
     return full;
@@ -174,6 +180,24 @@ function trimIfNeeded(root) {
   }
 }
 
+/** Does the log end without a newline? Only the last byte is read. */
+function endsMidLine(root) {
+  let fd;
+  try {
+    const file = eventsPath(root);
+    const size = fs.statSync(file).size;
+    if (!size) return false;
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(1);
+    fs.readSync(fd, buf, 0, 1, size - 1);
+    return buf[0] !== 0x0a;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
 function readLines(root) {
   try {
     return fs.readFileSync(eventsPath(root), 'utf8').split('\n').filter((l) => l.trim() !== '');
@@ -198,9 +222,26 @@ function readEvents(root) {
   return out;
 }
 
+/**
+ * The acknowledged position: `<event id>` and the timestamp it carried.
+ *
+ * The timestamp is the whole point. The cursor used to be a bare id, and
+ * `findIndex` returning -1 was treated identically to "never acknowledged
+ * anything" -- so once the cursor's own event was trimmed out of the log (200
+ * events later, or after any of the writes that used to be lost), every event
+ * in the file was unread again: a 200-event briefing dumped into the next
+ * prompt and `(+199)` on the status line. Falling back to "newer than the
+ * acknowledged time" degrades gracefully instead.
+ *
+ * Written as `<id> <iso>`; a bare id from an older phantom still parses.
+ * @returns {{ id: string, at: string|null }|null}
+ */
 function readCursor(root) {
   try {
-    return fs.readFileSync(cursorPath(root), 'utf8').trim() || null;
+    const raw = fs.readFileSync(cursorPath(root), 'utf8').trim();
+    if (!raw) return null;
+    const [id, at] = raw.split(/\s+/, 2);
+    return { id, at: at && Number.isFinite(Date.parse(at)) ? at : null };
   } catch {
     return null;
   }
@@ -217,10 +258,14 @@ function readUnread(root, opts = {}) {
   const staleMs = opts.staleMs === undefined ? STALE_MS : opts.staleMs;
   const events = readEvents(root);
   const cursor = readCursor(root);
-  const idx = cursor ? events.findIndex((e) => e.id === cursor) : -1;
+  const idx = cursor ? events.findIndex((e) => e.id === cursor.id) : -1;
+  // The cursor's event is gone but we know when it was: treat everything at or
+  // before that moment as already seen, rather than replaying the whole log.
+  const after = idx === -1 && cursor && cursor.at ? Date.parse(cursor.at) : null;
   return events.slice(idx + 1).filter((e) => {
     const t = Date.parse(e.at);
-    return Number.isFinite(t) && now - t <= staleMs;
+    if (!Number.isFinite(t) || now - t > staleMs) return false;
+    return after === null || t > after;
   });
 }
 
@@ -237,7 +282,8 @@ function markRead(root) {
     // Same rename dance as the log: a reader must never catch this file empty
     // between truncate and write, because an empty cursor replays everything.
     const tmp = cursorPath(root) + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, events[events.length - 1].id + '\n');
+    const last = events[events.length - 1];
+    fs.writeFileSync(tmp, last.id + ' ' + last.at + '\n');
     fs.renameSync(tmp, cursorPath(root));
     return true;
   } catch {
@@ -328,7 +374,7 @@ function describeEvent(ev, now = Date.now()) {
 }
 
 module.exports = {
-  MAX_ERROR_CHARS, MAX_COMMAND_CHARS, TRIM_AT,
+  MAX_ERROR_CHARS, endsMidLine, MAX_COMMAND_CHARS, TRIM_AT,
   EVENTS_REL, CURSOR_REL, MAX_EVENTS, STALE_MS,
   eventsPath, cursorPath, appendEvent, readEvents, readUnread, markRead, findRoot,
   crashEvent, recoveryEvent, describeEvent, timeAgo,

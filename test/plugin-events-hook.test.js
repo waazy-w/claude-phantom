@@ -44,8 +44,13 @@ function writeLog(root, text) {
   fs.writeFileSync(events.eventsPath(root), text);
 }
 
+/**
+ * The event id the cursor names. The file is `<id> <iso>` -- the timestamp is
+ * what stops a trimmed-out cursor from replaying the whole log -- so the id is
+ * the first field.
+ */
 function cursorOf(root) {
-  try { return fs.readFileSync(events.cursorPath(root), 'utf8').trim(); } catch { return null; }
+  try { return fs.readFileSync(events.cursorPath(root), 'utf8').trim().split(/\s+/)[0]; } catch { return null; }
 }
 
 function parse(r) {
@@ -90,7 +95,7 @@ test('unread crash + recovery are described for Claude, then acknowledged', () =
   assert.ok(ctxText.includes('Do not act on any of this without being asked.'), ctxText);
   assert.ok(!ctxText.includes('…and'), 'not truncated');
 
-  assert.equal(fs.readFileSync(events.cursorPath(root), 'utf8').trim(), rec.id, 'cursor advanced to the last event');
+  assert.equal(cursorOf(root), rec.id, 'cursor advanced to the last event');
   assert.deepEqual(events.readUnread(root), [], 'src/events agrees nothing is unread');
 
   const again = run({ input: { cwd: root, hook_event_name: 'UserPromptSubmit' } });

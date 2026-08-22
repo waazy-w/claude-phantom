@@ -198,3 +198,67 @@ test('describeEvent and timeAgo produce the shared one-liners', () => {
   const other = Object.assign({}, unfixed, { status: 'timeout' });
   assert.equal(events.describeEvent(other, now), 'recovery of `npm run dev` ended: timeout 3m ago');
 });
+
+test('a torn last line does not swallow the next event', () => {
+  // appendFileSync concatenates onto whatever is already there, so a log whose
+  // last line lost its newline -- a writer killed mid-write, a full disk --
+  // merged the next event into the broken one, and BOTH became unparseable.
+  // The crash simply never reached Claude or the status line.
+  const root = tmp();
+  fs.mkdirSync(path.join(root, '.phantom'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.phantom', 'events.jsonl'),
+    JSON.stringify({ v: 1, id: 'a', at: new Date().toISOString(), type: 'crash', command: 'npm test' }) + '\n'
+    + '{"v":1,"id":"partial","at":"' + new Date().toISOString() + '","type":"crash","command":"vite bu');
+
+  const written = events.appendEvent(root, { type: 'crash', command: 'pytest', error: null, exit: 1, signal: null });
+  assert.ok(written, 'the append succeeded');
+
+  const all = events.readEvents(root);
+  assert.ok(all.some((e) => e.command === 'pytest'), 'the new event survived the tear');
+  assert.ok(all.some((e) => e.command === 'npm test'), 'and so did the intact one before it');
+  // The torn record itself is unrecoverable; losing one is the cost of the
+  // tear, losing the NEXT one was the bug.
+  assert.ok(!all.some((e) => e.id === 'partial'));
+});
+
+test('one unreadable line does not replay every event the user already saw', () => {
+  // The cursor was a bare event id, and findIndex returning -1 was treated
+  // identically to "never acknowledged anything" -- so if the cursor's own line
+  // became unparseable while its neighbours survived, the whole retained log
+  // came back as unread: a 200-event briefing in the next prompt and (+199) on
+  // the status line. The cursor carries its timestamp now, so a missing id
+  // degrades to "newer than the acknowledged time" instead.
+  const root = tmp();
+  const t0 = Date.parse('2026-08-22T00:00:00Z');
+  for (let i = 0; i < 40; i++) {
+    events.appendEvent(root, { type: 'crash', command: 'seen' + i, error: null, exit: 1, signal: null }, { now: t0 + i * 1000 });
+  }
+  events.markRead(root);
+  for (let i = 0; i < 5; i++) {
+    events.appendEvent(root, { type: 'crash', command: 'new' + i, error: null, exit: 1, signal: null }, { now: t0 + 100000 + i * 1000 });
+  }
+
+  // One line goes bad; its neighbours are fine.
+  const file = path.join(root, '.phantom', 'events.jsonl');
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  lines[lines.findIndex((l) => l.includes('"seen39"'))] = '{corrupted';
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+
+  const unread = events.readUnread(root, { now: t0 + 200000 });
+  assert.equal(unread.filter((e) => e.command.startsWith('seen')).length, 0,
+    'nothing the user already acknowledged comes back');
+  assert.equal(unread.length, 5, 'only the genuinely new events: ' + unread.map((e) => e.command).join(', '));
+});
+
+test('the cursor records when it was set, not just what it named', () => {
+  const root = tmp();
+  events.appendEvent(root, { type: 'crash', command: 'x', error: null, exit: 1, signal: null });
+  events.markRead(root);
+  const raw = fs.readFileSync(path.join(root, '.phantom', 'events.cursor'), 'utf8').trim();
+  const [id, at] = raw.split(/\s+/);
+  assert.match(id, /\S/);
+  assert.ok(Number.isFinite(Date.parse(at)), 'a parseable timestamp: ' + raw);
+  // A bare id, written by an older phantom, must still be understood.
+  fs.writeFileSync(path.join(root, '.phantom', 'events.cursor'), id + '\n');
+  assert.equal(events.readUnread(root).length, 0, 'the old one-field format still acknowledges');
+});

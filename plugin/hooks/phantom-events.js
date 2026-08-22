@@ -63,9 +63,21 @@ function readEvents(root) {
   return out;
 }
 
+/**
+ * `<event id> <iso timestamp>`, matching src/events.js. Keep the two in sync:
+ * this file ships in the plugin and runs without src/ on disk.
+ *
+ * The timestamp is what stops a trimmed-out cursor from replaying the entire
+ * log as unread -- a 200-event briefing in the next prompt.
+ * A bare id, written by an older phantom, still parses.
+ * @returns {{ id: string, at: string|null }|null}
+ */
 function readCursor(root) {
   try {
-    return fs.readFileSync(cursorPath(root), 'utf8').trim() || null;
+    const raw = fs.readFileSync(cursorPath(root), 'utf8').trim();
+    if (!raw) return null;
+    const [id, at] = raw.split(/\s+/, 2);
+    return { id, at: at && Number.isFinite(Date.parse(at)) ? at : null };
   } catch {
     return null;
   }
@@ -73,10 +85,14 @@ function readCursor(root) {
 
 /** Events after the cursor that are younger than STALE_MS. */
 function unreadOf(events, cursor, now) {
-  const idx = cursor ? events.findIndex((e) => e.id === cursor) : -1;
+  const idx = cursor ? events.findIndex((e) => e.id === cursor.id) : -1;
+  // Cursor's event trimmed away: fall back to "newer than the acknowledged
+  // time" rather than treating it as never having acknowledged anything.
+  const after = idx === -1 && cursor && cursor.at ? Date.parse(cursor.at) : null;
   return events.slice(idx + 1).filter((e) => {
     const t = Date.parse(e.at);
-    return Number.isFinite(t) && now - t <= STALE_MS;
+    if (!Number.isFinite(t) || now - t > STALE_MS) return false;
+    return after === null || t > after;
   });
 }
 
@@ -89,7 +105,8 @@ function markRead(root, events) {
     // window where a concurrent reader sees an empty cursor, and an empty
     // cursor replays the entire log as unread.
     const tmp = cursorPath(root) + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, events[events.length - 1].id + '\n');
+    const last = events[events.length - 1];
+    fs.writeFileSync(tmp, last.id + ' ' + last.at + '\n');
     fs.renameSync(tmp, cursorPath(root));
   } catch { /* best-effort */ }
 }
