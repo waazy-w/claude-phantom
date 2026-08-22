@@ -124,7 +124,14 @@ test('happy path: fix lands on a phantom branch, report has verification, user r
 
   const res = await runRecovery(ctx, config, {}, { env: scenarioEnv('fix', logFile), exit: () => {} });
 
-  assert.equal(res.status, 'fixed', res.message);
+  // On a failure, say what the fake session actually did. `res.message` alone
+  // ("the session made no changes") describes the symptom on every platform and
+  // distinguishes none of them -- which cost several CI cycles of guessing when
+  // this went red on Windows only. The fixture logs each invocation, so its
+  // absence means the spawn never reached it, and its presence means it ran and
+  // the changes were lost afterwards. Those need completely different fixes.
+  assert.equal(res.status, 'fixed', res.message + ' | fake-claude invocations: '
+    + JSON.stringify(readLog(logFile)) + ' | branch: ' + res.branch);
   assert.equal(res.iterations, 1);
   assert.equal(res.testsPassed, true);
   assert.match(res.branch, /^phantom\/fix-typeerror-cannot-read-properties-/);
