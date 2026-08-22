@@ -19,1092 +19,430 @@
 <meta name="twitter:title" content="claude-phantom — your app crashed. phantom is on it.">
 <meta name="twitter:description" content="Autonomous crash-recovery agent for your terminal. Wrap any command; if it crashes, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix, and leaves a post-mortem. Your branch is never touched.">
 <meta name="twitter:image" content="https://claudephantom.dev/social-preview.png">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B0E0D">
 <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;700&display=swap">
-
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&display=swap">
 </head>
 <body>
 <style>
-/* ============================================================
-   claude-phantom — palette and type come from brand/BRAND.md.
-   Dark is the native world (a terminal); light is a full peer.
-   ============================================================ */
-/* --------------------------------------------------------------
-   TWO LAYERS.
+/* ==========================================================================
+   claude-phantom
+   --------------------------------------------------------------------------
+   The palette is the product. A phantom recovery is a terminal session that
+   goes wrong and then right, so the page runs crimson -> phosphor as you read
+   it: the crash is red, the verified fix is green, and everything between is
+   ink. That is also why there is no third accent -- a recovery has two states
+   and inventing a third colour would be decoration rather than meaning.
 
-   GROUND  the phantom body gradient. IDENTICAL in both themes, so
-           everything sitting on it (headings, lede, rules, the mark)
-           is constant too -- light text on bright green would be
-           illegible, so on-ground ink never flips.
-   PANEL   cards, tables, badges, tabs. THIS is what dark mode flips.
-   TERMINAL always dark, in both themes. Defined at the components.
-   -------------------------------------------------------------- */
-/* --------------------------------------------------------------
-   Black or white ground; the type is always phantom green.
-
-   Green cannot simply stay #2EE59D in both: on white it is 1.64:1,
-   effectively invisible. So the SAME green darkens for the white
-   ground (6.13:1) and stays bright on black (12.81:1). Same hue
-   family, same identity, legible on both.
-   -------------------------------------------------------------- */
+   Deliberately NOT near-black-plus-acid-green. That is the house style of
+   every AI landing page shipped this year, and this project's whole claim is
+   that it is more careful than that.
+   ========================================================================== */
 :root {
-  /* ---- LIGHT: white ground, deep phantom green type ---- */
-  --ground:      #FFFFFF;
-  --page-bg:     none;
-  --head:        #0F9D6A;
-  --ink:         #0A7049;
-  --ink-2:       #0B7A51;
-  --ink-3:       #0C8459;
-  --rule:        #A5DFC6;
-  --rule-soft:   #CDEEDF;
-  --accent:      #0F9D6A;
-  --accent-text: #0A7049;
-  --accent-glow: rgba(15,157,106,.18);
-  --h1-a:        #0F9D6A;
-  --h1-b:        #075C3A;
-  --rail-fill:   linear-gradient(180deg, #0F9D6A, #075C3A);
-  --mark-fill:   url(#phantomBody);
-  --mark-eye:    #0B1210;
-  --mark-glint:  #E8FFF4;
-  --code-bg:     rgba(15,157,106,.10);
-  --demo-light:  block;
-  --demo-dark:   none;
-  --canvas-rgb:  10,112,73;
-  --canvas-glow: rgba(15,157,106,0.035);
-  --shadow:      0 1px 2px rgba(7,60,40,.07), 0 14px 36px -14px rgba(7,60,40,.20);
-  --grain:       .012;
+  --ink:      #0B0E0D;   /* ground: near-black, biased green so it is not grey */
+  --ash:      #131A17;   /* raised surfaces */
+  --ash-2:    #1B2420;   /* raised, one step further */
+  --bone:     #E8EDEA;   /* primary text */
+  --dim:      #7E8C86;   /* secondary text */
+  --dimmer:   #4E5A55;   /* tertiary, rules */
+  --crimson:  #E2555A;   /* the crash */
+  --crimson-d:#2A1416;   /* crash, as a surface */
+  --phos:     #3DD68C;   /* the verified fix */
+  --phos-d:   #0E2A1E;   /* fix, as a surface */
+  --amber:    #E0A94F;   /* warnings only -- never used decoratively */
+  --rule:     rgba(232,237,234,.10);
+  --rule-hi:  rgba(232,237,234,.18);
 
-  --panel:        #FFFFFF;
-  --panel-2:      #F3FCF8;
-  --panel-ink:    #0A7049;
-  --panel-ink-2:  #0B7A51;
-  --panel-ink-3:  #0C8459;
-  --panel-rule:   #B9E7D2;
-  --panel-accent: #0F9D6A;
-  --on-panel-accent: #FFFFFF;
-
-  --green:       #2EE59D;
-  /* the terminal is a light terminal on the white ground */
-  --term-bg:      #F7F8FC;
-  --term-ink:     #2A2B3C;
-  --term-bar:     #ECEEF6;
-  --term-rule:    #DBDEEA;
-  --term-dot:     #C9CDDD;
-  --term-dim:     #6C6F85;
-  --term-grn:     #0A7049;
-  --term-red:     #C0104A;
-  --term-yel:     #8A6800;
-  --term-wht:     #191A27;
-  --term-key:     #1B5FD9;
-  --term-scan:    rgba(20,22,40,.030);
-
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display: 'Instrument Serif', ui-serif, Georgia, 'Times New Roman', serif;
 
-  --gut: clamp(20px, 5vw, 76px);
-  --rail: 76px;
   --measure: 66ch;
+  --gutter: clamp(20px, 5vw, 56px);
+  --rail: 56px;
+  /* Set from JS on scroll; declared here so the rail has a defined starting
+     state and does not depend on the fallback in the var() call. */
+  --progress: 0%;
 }
 
-/* ---- DARK: black ground, bright phantom green type ---- */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --ground:      #000000;
-    --page-bg:     none;
-    --head:        #5CF0B4;
-    --ink:         #2EE59D;
-    --ink-2:       #2ACF8E;
-    --ink-3:       #1FA875;
-    --rule:        #14402D;
-    --rule-soft:   #0E2C1F;
-    --accent:      #2EE59D;
-    --accent-text: #5CF0B4;
-    --accent-glow: rgba(46,229,157,.22);
-    --h1-a:        #5CF0B4;
-    --h1-b:        #1FC985;
-    --rail-fill:   linear-gradient(180deg, #5CF0B4, #1FC985);
-    --code-bg:     rgba(46,229,157,.12);
-    --demo-light:  none;
-    --demo-dark:   block;
-    --term-bg:      #060D0B;
-    --term-ink:     #D7EFE4;
-    --term-bar:     #0A1412;
-    --term-rule:    #1A2823;
-    --term-dot:     #22332C;
-    --term-dim:     #6E837A;
-    --term-grn:     #2EE59D;
-    --term-red:     #FF6B6B;
-    --term-yel:     #F5C464;
-    --term-wht:     #F3FBF7;
-    --term-key:     #7FD4FF;
-    --term-scan:    rgba(255,255,255,.028);
-    --canvas-rgb:  46,229,157;
-    --canvas-glow: rgba(46,229,157,0.10);
-    --shadow:      0 1px 2px rgba(0,0,0,.6), 0 18px 44px -16px rgba(0,0,0,.85);
-    --grain:       .03;
-
-    --panel:        #070D0B;
-    --panel-2:      #0C1712;
-    --panel-ink:    #2EE59D;
-    --panel-ink-2:  #2ACF8E;
-    --panel-ink-3:  #1FA875;
-    --panel-rule:   #16452F;
-    --panel-accent: #2EE59D;
-    --on-panel-accent: #04140E;
+/* A light theme exists, but this page is a terminal and dark is its native
+   state. Light is a courtesy for someone reading in daylight, not a peer. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ink: #FAFBFA; --ash: #F1F4F2; --ash-2: #E7ECE9;
+    --bone: #101614; --dim: #5A6863; --dimmer: #8E9B96;
+    --crimson-d: #FDECEC; --phos-d: #E6F7EE;
+    --phos: #12885A; --crimson: #C6383D;
+    --rule: rgba(16,22,20,.12); --rule-hi: rgba(16,22,20,.22);
   }
 }
-:root[data-theme="dark"] {
-  --ground:      #000000;
-  --page-bg:     none;
-  --head:        #5CF0B4;
-  --ink:         #2EE59D;
-  --ink-2:       #2ACF8E;
-  --ink-3:       #1FA875;
-  --rule:        #14402D;
-  --rule-soft:   #0E2C1F;
-  --accent:      #2EE59D;
-  --accent-text: #5CF0B4;
-  --accent-glow: rgba(46,229,157,.22);
-  --h1-a:        #5CF0B4;
-  --h1-b:        #1FC985;
-  --rail-fill:   linear-gradient(180deg, #5CF0B4, #1FC985);
-  --code-bg:     rgba(46,229,157,.12);
-  --demo-light:  none;
-  --demo-dark:   block;
-  --term-bg:      #060D0B;
-  --term-ink:     #D7EFE4;
-  --term-bar:     #0A1412;
-  --term-rule:    #1A2823;
-  --term-dot:     #22332C;
-  --term-dim:     #6E837A;
-  --term-grn:     #2EE59D;
-  --term-red:     #FF6B6B;
-  --term-yel:     #F5C464;
-  --term-wht:     #F3FBF7;
-  --term-key:     #7FD4FF;
-  --term-scan:    rgba(255,255,255,.028);
-  --canvas-rgb:  46,229,157;
-  --canvas-glow: rgba(46,229,157,0.10);
-  --shadow:      0 1px 2px rgba(0,0,0,.6), 0 18px 44px -16px rgba(0,0,0,.85);
-  --grain:       .03;
-
-  --panel:        #070D0B;
-  --panel-2:      #0C1712;
-  --panel-ink:    #2EE59D;
-  --panel-ink-2:  #2ACF8E;
-  --panel-ink-3:  #1FA875;
-  --panel-rule:   #16452F;
-  --panel-accent: #2EE59D;
-  --on-panel-accent: #04140E;
-}
-
-* { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 body {
-  margin: 0;
-  background: var(--ground);
-  background-image: var(--page-bg);
-  background-attachment: fixed;
-  color: var(--ink);
+  background: var(--ink);
+  color: var(--bone);
   font-family: var(--sans);
-  font-size: 16.5px;
-  line-height: 1.65;
+  font-size: 16px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
 }
 
-/* ---------- the phantom mark ---------- */
-/* On the green ground the gradient ghost would vanish into its own colour, so
-   fill/eyes/catchlight are tokens: gradient on dark, solid Void on green. */
-.mk-body  { fill: var(--mark-fill); }
-.mk-eye   { fill: var(--mark-eye); }
-.mk-glint { fill: var(--mark-glint); }
+/* ---- the rail -----------------------------------------------------------
+   A single hairline down the left of the page that fills crimson -> phosphor
+   as you scroll. It is the recovery, drawn: you arrive at a crash and leave
+   with a fix. On narrow screens it becomes a 2px bar at the very edge so it
+   never competes with the text for the gutter.
+   ------------------------------------------------------------------------ */
+.rail { position: fixed; left: calc(var(--rail) / 2); top: 0; bottom: 0; width: 1px;
+        background: var(--rule); z-index: 5; pointer-events: none; }
+.rail::after { content: ''; position: absolute; inset: 0 0 auto 0; height: var(--progress, 0%);
+               background: linear-gradient(180deg, var(--crimson), var(--phos));
+               box-shadow: 0 0 12px rgba(61,214,140,.35); }
+@media (max-width: 900px) { .rail { left: 0; } :root { --rail: 0px; } }
 
-/* ---------- ambient background ---------- */
-#phosphor {
-  position: fixed; inset: 0;
-  width: 100%; height: 100%;
-  z-index: 0; pointer-events: none;
-}
-.grain {
-  position: fixed; inset: -50%;
-  z-index: 1; pointer-events: none;
-  opacity: var(--grain);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-.page { position: relative; z-index: 2; }
+.wrap { width: min(100% - (2 * var(--gutter)), 1140px); margin-inline: auto; padding-left: var(--rail); }
+section { padding: clamp(64px, 11vw, 140px) 0; position: relative; }
+section + section { border-top: 1px solid var(--rule); }
 
-/* ---------- scroll rail ---------- */
-.rail {
-  position: fixed;
-  left: 0; top: 0; bottom: 0;
-  width: var(--rail);
-  z-index: 30;
-  display: flex; flex-direction: column; align-items: center;
-  padding: 22px 0 26px;
-  pointer-events: none;
-}
-.rail::before {
-  content: ""; position: absolute; left: 50%; top: 84px; bottom: 60px;
-  width: 1px; transform: translateX(-.5px);
-  background: var(--rule);
-}
-.rail-fill {
-  position: absolute; left: 50%; top: 84px;
-  width: 1px; transform: translateX(-.5px);
-  height: 0;
-  background: var(--rail-fill);
-  box-shadow: 0 0 10px var(--accent-glow);
-}
-.rail-mark {
-  position: absolute; left: 50%; top: 84px;
-  width: 22px; height: 22px; margin-left: -11px; margin-top: -11px;
-  opacity: 0; transition: opacity .4s;
-}
-.rail.lit .rail-mark { opacity: 1; }
-.rail-dots {
-  position: absolute; left: 50%; top: 84px; bottom: 60px;
-  width: 1px; transform: translateX(-.5px);
-}
-.rail-dot {
-  position: absolute; left: 50%; width: 5px; height: 5px; margin-left: -2.5px; margin-top: -2.5px;
-  border-radius: 50%;
-  background: var(--ground); border: 1px solid var(--rule);
-  transition: background .35s, border-color .35s, transform .35s;
-}
-.rail-dot.on { background: var(--accent); border-color: var(--accent); transform: scale(1.5); }
-.rail-top, .rail-bottom {
-  font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em;
-  text-transform: uppercase; color: var(--ink-3);
-  writing-mode: vertical-rl;
-}
-.rail-top { margin-bottom: auto; }
-.rail-bottom { margin-top: auto; transform: rotate(180deg); }
-@media (max-width: 900px) { .rail { display: none; } :root { --rail: 0px; } }
-
-/* ---------- shell ---------- */
-.wrap {
-  max-width: 1140px;
-  margin: 0 auto;
-  padding-left: var(--gut);
-  padding-right: var(--gut);
-}
-main { padding-left: var(--rail); }
-
-/* ---------- type ---------- */
-h1, h2, h3 { text-wrap: balance; margin: 0; }
-.eyebrow {
-  font-family: var(--mono); font-size: 11px; font-weight: 500;
-  letter-spacing: .2em; text-transform: uppercase; color: var(--accent-text);
-  display: flex; align-items: center; gap: 10px;
-}
-.eyebrow::before {
-  content: ""; width: 18px; height: 1px; background: var(--accent); opacity: .7;
-}
-h2 {
-  color: var(--head);
-  font-family: var(--mono); font-weight: 700;
-  font-size: clamp(25px, 3.4vw, 38px);
-  letter-spacing: -.03em; line-height: 1.12;
-  margin: 14px 0 0;
-}
-.lede { max-width: var(--measure); color: var(--ink-2); font-size: 17px; margin: 16px 0 0; }
-p { margin: 0 0 1em; }
-p:last-child { margin-bottom: 0; }
-a { color: var(--accent-text); text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 3px; }
-a:hover { text-decoration-color: var(--accent); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+/* ---- type --------------------------------------------------------------- */
+h1, h2, h3 { margin: 0; font-weight: 400; text-wrap: balance; }
+h1 { font-family: var(--display); font-size: clamp(3rem, 9vw, 6.5rem); line-height: .96; letter-spacing: -.02em; }
+h1 em { font-style: italic; }
+h2 { font-family: var(--display); font-size: clamp(2rem, 4.6vw, 3.4rem); line-height: 1.05; letter-spacing: -.015em; }
+h3 { font-family: var(--sans); font-size: 1.0625rem; font-weight: 600; letter-spacing: -.01em; }
+p { margin: 0 0 1em; max-width: var(--measure); }
+a { color: inherit; text-underline-offset: 3px; text-decoration-color: var(--dimmer); }
+a:hover { text-decoration-color: var(--phos); }
+:focus-visible { outline: 2px solid var(--phos); outline-offset: 3px; border-radius: 2px; }
 code, kbd { font-family: var(--mono); font-size: .875em; }
-p code, li code, td code, dd code {
-  background: var(--code-bg); border: 1px solid var(--rule);
-  padding: .08em .38em; border-radius: 2px; color: var(--ink);
-  overflow-wrap: anywhere;
-}
-/* inside a panel, code follows the panel rather than the ground */
-.cell code, td code, .cell p code {
-  background: var(--panel-2); border-color: var(--panel-rule); color: var(--panel-ink);
-}
 
-section { padding: clamp(66px, 9vw, 118px) 0; position: relative; }
-section + section { border-top: 1px solid var(--rule-soft); }
+.eyebrow { font-family: var(--mono); font-size: .6875rem; letter-spacing: .18em; text-transform: uppercase;
+           color: var(--dim); margin: 0 0 18px; display: flex; align-items: center; gap: 10px; }
+.eyebrow::before { content: ''; width: 20px; height: 1px; background: var(--dimmer); }
+.lede { font-size: clamp(1.0625rem, 1.7vw, 1.3125rem); line-height: 1.5; color: var(--dim); max-width: 58ch; }
+.lede strong { color: var(--bone); font-weight: 500; }
+.fine { font-size: .875rem; color: var(--dim); }
 
-/* ---------- reveal ---------- */
-.rv { opacity: 0; transform: translateY(16px); transition: opacity .7s cubic-bezier(.2,.7,.3,1), transform .7s cubic-bezier(.2,.7,.3,1); }
+/* ---- reveal ------------------------------------------------------------- */
+.rv { opacity: 0; transform: translateY(14px); transition: opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1); }
 .rv.in { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) {
-  .rv { opacity: 1; transform: none; transition: none; }
-}
+@media (prefers-reduced-motion: reduce) { .rv { opacity: 1; transform: none; transition: none; } }
+/* No JS? Everything must still be readable. */
+.no-js .rv { opacity: 1; transform: none; }
 
-/* ============================================================
-   HERO
-   ============================================================ */
-.hero { padding-top: clamp(46px, 7vw, 86px); padding-bottom: clamp(54px, 7vw, 92px); }
-.hero-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: clamp(28px, 3.6vw, 50px); align-items: center; }
-@media (max-width: 980px) { .hero-grid { grid-template-columns: 1fr; } }
-
-.lockup { display: flex; align-items: center; gap: 14px; }
-.lockup svg { width: 46px; height: 46px; display: block; }
-.lockup-txt { display: flex; flex-direction: column; line-height: 1; }
-.lockup-name { font-family: var(--mono); font-weight: 700; font-size: 25px; letter-spacing: -.03em; color: var(--head); }
-.lockup-sub { font-family: var(--mono); font-size: 9.5px; letter-spacing: .22em; color: var(--ink-3); margin-top: 5px; }
-
-h1 {
-  color: var(--head);
-  font-family: var(--mono); font-weight: 700;
-  font-size: clamp(29px, 3.85vw, 44px);
-  letter-spacing: -.045em; line-height: 1.14;
-  margin: 26px 0 0;
+/* ---- hero --------------------------------------------------------------- */
+.hero { padding-top: clamp(48px, 9vw, 108px); }
+.mark { display: flex; align-items: center; gap: 12px; margin-bottom: clamp(28px, 5vw, 44px); }
+.mark svg { width: 34px; height: 34px; display: block; }
+.mark .wordmark { font-family: var(--mono); font-size: .8125rem; letter-spacing: .1em; color: var(--dim); }
+.mk-body { fill: var(--bone); }
+.mk-eye { fill: var(--ink); }
+/* The eyes blink. Once, slowly, a long time apart -- a ghost that is watching,
+   not a mascot demanding attention. */
+@media (prefers-reduced-motion: no-preference) {
+  .mk-eye { animation: blink 9s infinite; transform-origin: center; }
+  @keyframes blink { 0%,96%,100% { transform: scaleY(1); } 98% { transform: scaleY(.08); } }
 }
-h1 .l { display: block; white-space: nowrap; }
-h1 .g {
-  background: linear-gradient(180deg, var(--h1-a), var(--h1-b));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.hero-lede { font-size: 18px; color: var(--ink-2); max-width: 50ch; margin-top: 18px; }
+h1 .line { display: block; }
+h1 .crash { color: var(--crimson); }
+h1 .fix { color: var(--phos); }
+.hero-lede { margin-top: clamp(22px, 3.5vw, 34px); }
 
-.install { margin-top: 26px; display: flex; flex-direction: column; gap: 9px; max-width: 460px; }
-.cmd {
-  display: flex; align-items: center; gap: 12px;
-  background: var(--term-bg); border: 1px solid var(--term-rule);
-  border-radius: 3px; padding: 12px 13px;
-  font-family: var(--mono); font-size: 13.5px; color: var(--term-ink);
-  box-shadow: var(--shadow);
-}
-.cmd .pr { color: var(--term-grn); flex: none; }
-.cmd .txt { flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: none; text-align: left; }
+.install { margin-top: clamp(28px, 4.5vw, 42px); display: grid; gap: 8px; max-width: 560px; }
+.cmd { display: flex; align-items: center; gap: 12px; background: var(--ash); border: 1px solid var(--rule);
+       border-radius: 8px; padding: 13px 14px; font-family: var(--mono); font-size: .875rem; }
+.cmd .pr { color: var(--phos); user-select: none; }
+.cmd .txt { flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
 .cmd .txt::-webkit-scrollbar { display: none; }
-.copy {
-  flex: none; font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
-  background: transparent; color: var(--term-dim); border: 1px solid var(--term-rule);
-  border-radius: 2px; padding: 4px 8px; cursor: pointer; transition: color .2s, border-color .2s;
-}
-.copy:hover { color: var(--term-grn); border-color: var(--term-grn); }
-.copy.done { color: var(--term-grn); border-color: var(--term-grn); }
+.copy { font-family: var(--mono); font-size: .6875rem; letter-spacing: .06em; text-transform: uppercase;
+        background: none; border: 1px solid var(--rule-hi); color: var(--dim); border-radius: 5px;
+        padding: 5px 9px; cursor: pointer; transition: color .2s, border-color .2s; }
+.copy:hover { color: var(--phos); border-color: var(--phos); }
+.copy.done { color: var(--phos); border-color: var(--phos); }
 
-.badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 20px; }
-.badge {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em;
-  border: 1px solid var(--panel-rule); border-radius: 2px; padding: 4px 9px;
-  color: var(--panel-ink-2); background: var(--panel);
-}
-.badge b { color: var(--panel-accent); font-weight: 500; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; font-family: var(--mono); font-size: .6875rem; }
+.badge { border: 1px solid var(--rule-hi); border-radius: 999px; padding: 4px 11px; color: var(--dim); }
+.badge b { color: var(--bone); font-weight: 500; }
 
-/* hero terminal */
-.term {
-  background: var(--term-bg);
-  border: 1px solid var(--term-rule);
-  border-radius: 4px;
-  box-shadow: var(--shadow);
-  overflow: hidden;
-  position: relative;
-}
-.term::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: repeating-linear-gradient(180deg, var(--term-scan) 0 1px, transparent 1px 3px);
-}
-.term-bar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 13px; border-bottom: 1px solid var(--term-rule); background: var(--term-bar);
-}
-.term-bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--term-dot); display: block; }
-.term-bar .t { font-family: var(--mono); font-size: 10.5px; color: var(--term-dim); margin-left: 6px; letter-spacing: .06em; }
-.term-body {
-  font-family: var(--mono); font-size: 12.6px; line-height: 1.72;
-  padding: 15px 16px 17px; color: var(--term-ink);
-  min-height: 344px;
-  white-space: pre-wrap; word-break: break-word;
-}
-.term-body .dim { color: var(--term-dim); }
-.term-body .grn { color: var(--term-grn); }
-.term-body .red { color: var(--term-red); }
-.term-body .yel { color: var(--term-yel); }
-.term-body .wht { color: var(--term-wht); }
-.caret { display: inline-block; width: 7px; height: 14px; background: var(--term-grn); vertical-align: -2px; animation: blink 1.05s steps(1) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+/* ---- terminal ----------------------------------------------------------- */
+.term { background: var(--ash); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden;
+        font-family: var(--mono); font-size: .8125rem; line-height: 1.75; }
+.term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--rule); }
+.term-bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--dimmer); display: block; }
+.term-bar span { margin-left: 8px; font-size: .6875rem; color: var(--dim); letter-spacing: .04em; }
+.term-body { padding: 16px 18px; overflow-x: auto; }
+.term-body div { white-space: pre; min-height: 1.75em; }
+.term .c { color: var(--crimson); }
+.term .g { color: var(--phos); }
+.term .d { color: var(--dim); }
+.term .a { color: var(--amber); }
+.term .w { color: var(--bone); }
 
-/* ============================================================
-   PIPELINE
-   ============================================================ */
-.stages { margin-top: 46px; display: flex; flex-direction: column; gap: 0; }
-.stage {
-  display: grid; grid-template-columns: 60px 1fr; gap: 22px;
-  padding: 22px 0; border-top: 1px solid var(--rule-soft);
-  align-items: start;
-}
-.stage:last-child { border-bottom: 1px solid var(--rule-soft); }
-.stage-n {
-  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
-  color: var(--ink-3); padding-top: 4px;
-  font-variant-numeric: tabular-nums;
-}
-.stage.hot .stage-n { color: var(--accent-text); }
-.stage h3 { font-family: var(--mono); font-size: 16px; font-weight: 500; letter-spacing: -.015em; color: var(--head); }
-.stage p { color: var(--ink-2); font-size: 15.4px; margin: 7px 0 0; max-width: 62ch; }
-.stage .out {
-  font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
-  margin-top: 9px; display: inline-flex; align-items: center; gap: 7px;
-}
-.stage .out::before { content: "→"; color: var(--accent); }
+/* ---- grids -------------------------------------------------------------- */
+.split { display: grid; gap: clamp(28px, 5vw, 64px); grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 940px) { .split { grid-template-columns: 1fr 1fr; } .split.narrow-first { grid-template-columns: 5fr 7fr; } }
 
-/* ============================================================
-   CARDS / GRIDS
-   ============================================================ */
-.grid { display: grid; gap: 1px; background: var(--panel-rule); border: 1px solid var(--panel-rule); border-radius: 4px; overflow: hidden; margin-top: 40px; }
-.g2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
-.g3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
-@media (max-width: 860px) { .g2, .g3 { grid-template-columns: 1fr; } }
-.cell { background: var(--panel); padding: 24px 22px; }
-.cell h3 {
-  font-family: var(--mono); font-size: 13.5px; font-weight: 500; letter-spacing: -.005em;
-  color: var(--panel-ink); display: flex; align-items: baseline; gap: 9px;
-}
-.cell h3::before {
-  content: ""; width: 6px; height: 6px; flex: none; border-radius: 1px;
-  background: var(--panel-accent); transform: translateY(-1px);
-}
-.cell p { color: var(--panel-ink-2); font-size: 14.6px; margin: 9px 0 0; }
+.cards { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+         border-radius: 10px; overflow: hidden; margin-top: clamp(28px, 4vw, 44px); }
+@media (min-width: 720px) { .cards.two { grid-template-columns: 1fr 1fr; } .cards.three { grid-template-columns: repeat(3, 1fr); } }
+.card { background: var(--ink); padding: clamp(20px, 2.6vw, 30px); }
+.card h3 { margin-bottom: 8px; }
+.card p { font-size: .9375rem; color: var(--dim); margin: 0; }
+.card .k { font-family: var(--mono); font-size: .6875rem; color: var(--phos); letter-spacing: .1em;
+           text-transform: uppercase; display: block; margin-bottom: 12px; }
 
-/* ============================================================
-   TABLES
-   ============================================================ */
-.tw { overflow-x: auto; margin-top: 36px; border: 1px solid var(--panel-rule); border-radius: 4px; }
-table { border-collapse: collapse; width: 100%; min-width: 560px; background: var(--panel); }
-th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--panel-rule); vertical-align: top; }
+/* ---- steps -------------------------------------------------------------- */
+.steps { margin-top: clamp(30px, 4vw, 48px); display: grid; gap: 0; }
+.step { display: grid; grid-template-columns: 30px 1fr; gap: 18px; padding: 16px 0; border-top: 1px solid var(--rule); }
+.step:last-child { border-bottom: 1px solid var(--rule); }
+.step .n { font-family: var(--mono); font-size: .75rem; color: var(--dimmer); padding-top: 3px; }
+.step p { margin: 0; font-size: .9375rem; }
+.step p b { font-weight: 600; color: var(--bone); }
+.step.is-fix .n { color: var(--phos); }
+
+/* ---- table -------------------------------------------------------------- */
+.tw { overflow-x: auto; margin-top: clamp(26px, 3.6vw, 40px); border: 1px solid var(--rule); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: .9375rem; }
+th, td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--rule); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
-th {
-  font-family: var(--mono); font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
-  color: var(--panel-ink-3); font-weight: 500; background: var(--panel-2);
-  position: sticky; top: 0;
-}
-td { font-size: 14.6px; color: var(--panel-ink-2); }
-td:first-child { color: var(--panel-ink); white-space: nowrap; }
-td.f { font-family: var(--mono); font-size: 12.6px; color: var(--panel-accent); }
+th { font-family: var(--mono); font-size: .6875rem; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); font-weight: 400; }
+td.f { font-family: var(--mono); font-size: .8125rem; color: var(--bone); white-space: nowrap; }
+td:last-child { color: var(--dim); }
 
-/* ============================================================
-   CODE BLOCKS
-   ============================================================ */
-pre {
-  background: var(--term-bg); color: var(--term-ink);
-  border: 1px solid var(--term-rule); border-radius: 4px;
-  padding: 16px 17px; overflow-x: auto; margin: 0;
-  font-family: var(--mono); font-size: 12.4px; line-height: 1.68;
-  box-shadow: var(--shadow);
-}
-pre .dim { color: var(--term-dim); }
-pre .grn { color: var(--term-grn); }
-pre .red { color: var(--term-red); }
-pre .yel { color: var(--term-yel); }
-pre .wht { color: var(--term-wht); }
-pre .key { color: var(--term-key); }
+/* ---- proof -------------------------------------------------------------- */
+.stats { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+         border-radius: 10px; overflow: hidden; margin-top: clamp(28px, 4vw, 44px); }
+@media (min-width: 660px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+.stat { background: var(--ink); padding: clamp(20px, 2.4vw, 28px); }
+.stat b { display: block; font-family: var(--display); font-size: clamp(2.2rem, 4.4vw, 3.2rem);
+          line-height: 1; color: var(--phos); font-variant-numeric: tabular-nums; }
+.stat span { display: block; margin-top: 8px; font-size: .8125rem; color: var(--dim); }
 
-/* ============================================================
-   DEMO
-   ============================================================ */
-.demo-frame {
-  margin-top: 40px; border: 1px solid var(--term-rule); border-radius: 5px;
-  overflow: hidden; background: var(--term-bg); box-shadow: var(--shadow);
-}
-.demo-frame img { width: 100%; height: auto; }
-/* the recording exists in both themes; only one is ever in the layout */
-.demo-frame img.for-light { display: var(--demo-light); }
-.demo-frame img.for-dark  { display: var(--demo-dark); }
-.demo-cap { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 12px; }
+/* ---- faq ---------------------------------------------------------------- */
+.qa { border-top: 1px solid var(--rule); }
+.qa details { border-bottom: 1px solid var(--rule); }
+.qa summary { padding: 18px 0; cursor: pointer; list-style: none; font-weight: 500;
+              display: flex; justify-content: space-between; gap: 20px; align-items: baseline; }
+.qa summary::-webkit-details-marker { display: none; }
+.qa summary::after { content: '+'; font-family: var(--mono); color: var(--dim); flex: none; }
+.qa details[open] summary::after { content: '−'; color: var(--phos); }
+.qa .a { padding: 0 0 20px; color: var(--dim); font-size: .9375rem; max-width: var(--measure); }
+.qa .a p:last-child { margin-bottom: 0; }
 
-/* ============================================================
-   REPORT / BANNER SPLIT
-   ============================================================ */
-.split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; margin-top: 40px; }
-@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
-.slab-label {
-  font-family: var(--mono); font-size: 10px; letter-spacing: .17em; text-transform: uppercase;
-  color: var(--ink-3); margin-bottom: 10px;
-}
-
-/* ============================================================
-   FAQ
-   ============================================================ */
-.faq { margin-top: 38px; border-top: 1px solid var(--rule-soft); }
-details {
-  border-bottom: 1px solid var(--rule-soft);
-}
-summary {
-  cursor: pointer; list-style: none;
-  padding: 17px 34px 17px 0; position: relative;
-  font-family: var(--mono); font-size: 14.6px; color: var(--head);
-  transition: color .2s;
-}
-summary::-webkit-details-marker { display: none; }
-summary:hover { color: var(--accent-text); }
-summary::after {
-  content: "+"; position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  font-family: var(--mono); color: var(--accent); font-size: 16px;
-}
-details[open] summary::after { content: "−"; }
-details .a { padding: 0 0 19px; color: var(--ink-2); font-size: 15.4px; max-width: var(--measure); }
-
-/* ============================================================
-   LIMITS
-   ============================================================ */
-.limits { margin-top: 36px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 0 34px; }
-@media (max-width: 860px) { .limits { grid-template-columns: 1fr; } }
-.limits div {
-  padding: 13px 0; border-bottom: 1px solid var(--rule-soft);
-  font-size: 14.8px; color: var(--ink-2);
-}
-.limits b { color: var(--head); font-weight: 500; font-family: var(--mono); font-size: 13.4px; display: block; margin-bottom: 3px; }
-
-/* ============================================================
-   INSTALL TABS
-   ============================================================ */
-.tabs {
-  display: inline-flex; flex-wrap: wrap; justify-content: center; max-width: 100%; gap: 2px; margin: 0 auto 14px;
-  background: var(--panel-2); border: 1px solid var(--panel-rule);
-  border-radius: 3px; padding: 3px;
-}
-.tabs button {
-  font-family: var(--mono); font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
-  border: 0; border-radius: 2px; padding: 7px 13px; cursor: pointer;
-  background: transparent; color: var(--panel-ink-3);
-  transition: background .18s, color .18s;
-}
-.tabs button:hover { color: var(--panel-ink); }
-.tabs button[aria-selected="true"] { background: var(--panel-accent); color: var(--on-panel-accent); }
-.pane[hidden] { display: none; }
-.pane-note { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 11px; }
-
-/* ============================================================
-   THEME TOGGLE
-   ============================================================ */
-.theme {
-  position: fixed; top: 18px; right: 18px; z-index: 40;
-  display: flex; align-items: center; gap: 7px;
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  border: 1px solid var(--panel-rule);
-  border-radius: 999px; padding: 6px 7px;
-  backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
-  box-shadow: var(--shadow);
-}
-.theme button {
-  display: grid; place-items: center;
-  width: 27px; height: 27px; padding: 0;
-  border: 0; border-radius: 999px; cursor: pointer;
-  background: transparent; color: var(--panel-ink-3);
-  transition: background .2s, color .2s;
-}
-.theme button:hover { color: var(--panel-ink); }
-.theme button[aria-pressed="true"] { background: var(--panel-accent); color: var(--on-panel-accent); }
-.theme svg { width: 14px; height: 14px; display: block; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-@media (max-width: 620px) { .theme { top: 10px; right: 10px; } }
-
-/* ============================================================
-   CTA + FOOTER
-   ============================================================ */
+/* ---- cta / footer ------------------------------------------------------- */
 .cta { text-align: center; }
-.cta h2 { font-size: clamp(27px, 4vw, 44px); }
-.cta .install { margin-left: auto; margin-right: auto; align-items: stretch; max-width: 580px; }
-.cta-note { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 16px; }
-footer {
-  border-top: 1px solid var(--rule-soft);
-  padding: 34px 0 44px;
-  display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between;
-  font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
-}
-footer nav { display: flex; flex-wrap: wrap; gap: 18px; }
-footer a { color: var(--ink-3); text-decoration: none; }
-footer a:hover { color: var(--accent-text); }
-.ghost-note { display: flex; align-items: center; gap: 9px; }
-.ghost-note svg { width: 15px; height: 15px; }
+.cta .install { margin-inline: auto; }
+.cta .lede { margin-inline: auto; }
+footer { padding: 40px 0 60px; border-top: 1px solid var(--rule); font-size: .8125rem; color: var(--dim); }
+.foot { display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: space-between; align-items: center; }
+.foot nav { display: flex; flex-wrap: wrap; gap: 18px; }
 </style>
 
-<svg width="0" height="0" aria-hidden="true" style="position:absolute">
-  <defs><linearGradient id="phantomBody" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0" stop-color="#5CF0B4"/><stop offset="1" stop-color="#1FC985"/>
-  </linearGradient></defs>
-</svg>
-
-<div class="theme" role="group" aria-label="Colour theme">
-  <button id="thLight" type="button" aria-pressed="false" title="Light" aria-label="Light theme">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/></svg>
-  </button>
-  <button id="thSystem" type="button" aria-pressed="true" title="Match system" aria-label="Match system theme">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.8" y="4.4" width="18.4" height="12.6" rx="1.8"/><path d="M8.4 20.2h7.2"/></svg>
-  </button>
-  <button id="thDark" type="button" aria-pressed="false" title="Dark" aria-label="Dark theme">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 13.6A8.5 8.5 0 0 1 10.4 3.6a8.5 8.5 0 1 0 10 10z"/></svg>
-  </button>
-</div>
-
-<canvas id="phosphor" aria-hidden="true"></canvas>
-<div class="grain" aria-hidden="true"></div>
-
-<div class="rail" id="rail" aria-hidden="true">
-  <div class="rail-top">crash</div>
-  <div class="rail-fill" id="railFill"></div>
-  <div class="rail-dots" id="railDots"></div>
-  <div class="rail-mark" id="railMark">
-    <svg viewBox="0 0 256 256"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
-  </div>
-  <div class="rail-bottom">recovered</div>
-</div>
-
-<div class="page">
-<main>
+<div class="rail" aria-hidden="true"></div>
 
 <!-- ============================ HERO ============================ -->
 <section class="hero" id="top">
   <div class="wrap">
-    <div class="hero-grid">
-      <div>
-        <div class="lockup rv">
-          <svg viewBox="0 0 256 256" role="img" aria-label="claude-phantom">
-            
-            <path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/>
-            <rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/>
-            <rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/>
-            <rect x="100" y="104" width="6" height="12" rx="3" class="mk-glint" opacity=".9"/>
-            <rect x="142" y="104" width="6" height="12" rx="3" class="mk-glint" opacity=".9"/>
-          </svg>
-          <div class="lockup-txt">
-            <span class="lockup-name">phantom</span>
-            <span class="lockup-sub">CLAUDE-PHANTOM</span>
-          </div>
-        </div>
+    <div class="mark rv">
+      <svg viewBox="0 0 256 256" role="img" aria-label="claude-phantom">
+        <path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/>
+        <rect class="mk-eye" x="96" y="98" width="22" height="40" rx="11"/>
+        <rect class="mk-eye" x="138" y="98" width="22" height="40" rx="11"/>
+      </svg>
+      <span class="wordmark">claude-phantom</span>
+    </div>
 
-        <h1 class="rv"><span class="l">your app crashed.</span><span class="l g">phantom is on it.</span></h1>
+    <h1 class="rv">
+      <span class="line crash">your app crashed.</span>
+      <span class="line fix"><em>phantom</em> is on it.</span>
+    </h1>
 
-        <p class="hero-lede rv">Wrap any command. If it dies, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix independently, and leaves a post-mortem. Your branch is never touched.</p>
+    <p class="lede hero-lede rv">Wrap any command. If it dies, a headless Claude Code session diagnoses the bug, writes a failing test, patches it on a separate branch, verifies the fix independently, and leaves a post-mortem. <strong>Your branch is never touched.</strong></p>
 
-        <div class="install rv">
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c1">npm install -g claude-phantom</span>
-            <button class="copy" data-c="c1">copy</button>
-          </div>
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c2">phantom npm run dev</span>
-            <button class="copy" data-c="c2">copy</button>
-          </div>
-        </div>
+    <div class="install rv">
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c1">npm install -g claude-phantom</span><button class="copy" data-c="c1">copy</button></div>
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c2">phantom npm run dev</span><button class="copy" data-c="c2">copy</button></div>
+    </div>
 
-        <p class="cta-note rv" style="margin-top:10px;text-align:left">or <a href="#install">install from GitHub</a> — <code>npm i -g github:waazy-w/claude-phantom</code></p>
-
-        <div class="badges rv">
-          <span class="badge">v<b>0.7.0</b></span>
-          <span class="badge">dependencies <b>0</b></span>
-          <span class="badge">node <b>&gt;=18</b></span>
-          <span class="badge">MIT</span>
-          <span class="badge">532 tests</span>
-        </div>
-      </div>
-
-      <div class="rv">
-        <div class="term">
-          <div class="term-bar">
-            <i></i><i></i><i></i>
-            <span class="t">zsh — phantom npm start</span>
-          </div>
-          <div class="term-body" id="typer"></div>
-        </div>
-      </div>
+    <div class="badges rv">
+      <span class="badge">v<b>0.7.0</b></span>
+      <span class="badge"><b>532 tests</b></span>
+      <span class="badge"><b>0</b> dependencies</span>
+      <span class="badge">node <b>&ge;18</b></span>
+      <span class="badge">MIT</span>
     </div>
   </div>
 </section>
 
-<!-- ============================ DEMO ============================ -->
+<!-- ============================ THE 90 SECONDS ============================ -->
 <section id="demo">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">recorded, not staged</div>
-      <h2>One real recovery, start to finish.</h2>
-      <p class="lede">A guest order with no <code>customer</code> takes down a Node service. Phantom catches the exit, opens a fix branch, patches it, runs the tests itself, and writes the post-mortem — while you watch.</p>
+    <p class="eyebrow rv">what it looks like</p>
+    <h2 class="rv">Ninety seconds you<br>weren't going to enjoy.</h2>
+    <p class="lede rv" style="margin-top:20px">Phantom runs your command untouched and stays out of the way. Your exit code passes through unchanged, so it is safe inside <code>&amp;&amp;</code> chains and CI.</p>
+
+    <div class="term rv" style="margin-top:36px" id="tape">
+      <div class="term-bar"><i></i><i></i><i></i><span>zsh — phantom npm run dev</span></div>
+      <div class="term-body" id="tape-body">
+        <div><span class="d">$</span> phantom npm run dev</div>
+        <div class="c">TypeError: Cannot read properties of undefined (reading 'email')</div>
+        <div class="d">    at formatOrderLine (src/report.js:9:31)</div>
+        <div>&nbsp;</div>
+        <div class="w">👻 node src/server.js crashed (exit 1) — phantom is taking over</div>
+        <div class="d">phantom › working on branch phantom/fix-typeerror-…-k3f9a</div>
+        <div class="d">phantom › ⠹ 1/3 · reading src/report.js · 0m 14s / 15m</div>
+        <div class="d">phantom › ⠧ 1/3 · running npm test · 1m 02s / 15m</div>
+        <div class="g">phantom › tests pass</div>
+        <div class="g">phantom › npm run dev now exits 0 — the crash is gone</div>
+        <div>&nbsp;</div>
+        <div class="g">👻 phantom ✅ fixed · 1m 48s · 34.1k tokens</div>
+        <div class="d">   review  git diff main..phantom/fix-typeerror-…-k3f9a</div>
+        <div class="d">   accept  git merge phantom/fix-typeerror-…-k3f9a</div>
+      </div>
     </div>
-    <div class="demo-frame rv">
-      <img class="for-dark" src="/demo.gif" width="900" height="525" alt="Terminal recording: a Node service throws a TypeError on a guest order, phantom detects the crash, opens a fix branch, patches the code, runs the test suite, and prints a FIXED banner with the report path.">
-      <img class="for-light" src="/demo-light.gif" width="900" height="525" alt="Terminal recording: a Node service throws a TypeError on a guest order, phantom detects the crash, opens a fix branch, patches the code, runs the test suite, and prints a FIXED banner with the report path.">
+    <p class="fine rv" style="margin-top:16px">The middle two lines are live: the guard hook sees every file the session touches, so the spinner tells you what is happening rather than only that something is.</p>
+  </div>
+</section>
+
+<!-- ============================ THE OBJECTION ============================ -->
+<section id="safety">
+  <div class="wrap">
+    <p class="eyebrow rv">the part you actually care about</p>
+    <h2 class="rv">It never commits to<br>your branch.</h2>
+    <p class="lede rv" style="margin-top:20px">Letting an agent loose in your repo is the objection, and it should be. Every rail below is a mechanism, not a promise — and each one is there because the alternative was tried and written down.</p>
+
+    <div class="tw rv">
+      <table>
+        <thead><tr><th>Rail</th><th>Mechanism</th></tr></thead>
+        <tbody>
+          <tr><td class="f">never your branch</td><td>A <code>phantom/fix-*</code> branch is cut from HEAD before any edit, and you are checked back out when it finishes — success or failure. The fix exists only as a branch to diff, merge, or delete.</td></tr>
+          <tr><td class="f">never your secrets</td><td><code>.env</code>, <code>*.pem</code>, <code>*.key</code>, <code>secrets/**</code> are enforced three ways: permission deny rules, a <code>PreToolUse</code> guard hook on every call, and a post-session audit that hard-reverts the branch on any hit.</td></tr>
+          <tr><td class="f">never the network</td><td>No <code>WebFetch</code>, no <code>curl</code>, no <code>git push</code>. There is no push code path to configure.</td></tr>
+          <tr><td class="f">never a green lie</td><td>Phantom re-runs your tests itself, outside the session, and then re-runs the command that crashed. A session that claims success without changing anything is reported <code>unfixed</code>.</td></tr>
+          <tr><td class="f">never unbounded</td><td><code>maxIterations</code>, <code>maxMinutes</code>, and a real spend ceiling — <code>maxTokens</code> or <code>maxCostUsd</code> — checked before each additional attempt.</td></tr>
+          <tr><td class="f">Ctrl+C is a kill switch</td><td>Kills the process tree, rescues untracked work into a stash, resets the fix branch, checks your branch back out, exits 130. <code>SIGTERM</code> and <code>SIGHUP</code> do the same.</td></tr>
+        </tbody>
+      </table>
     </div>
-    <p class="demo-cap rv">examples/crash-demo · one iteration · 1m 48s wall clock</p>
+
+    <div class="cards two rv">
+      <div class="card">
+        <span class="k">not a sandbox</span>
+        <p>The session runs <code>node</code> — it has to, to run your tests — so a one-liner can read what your user can read. The guard is <em>lexical</em>: an audit found four ways past it in one afternoon. All four are fixed and pinned by tests, and the honest lesson is that a lexical guard is a speed bump. Branch isolation and the post-session audit are the real backstops. Need hard isolation? Run it in a container.</p>
+      </div>
+      <div class="card">
+        <span class="k">redaction is pattern-based</span>
+        <p>Output, and the command line phantom displays, are scrubbed before the model, the report, the notification or the webhook ever see them — <code>KEY=value</code>, <code>Authorization</code> headers, URL credentials, PEM blocks, well-known token shapes. Unusual formats get through. It is a safety net, not a guarantee.</p>
+      </div>
+    </div>
   </div>
 </section>
 
 <!-- ============================ HOW ============================ -->
 <section id="how">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">how it works</div>
-      <h2>Invisible until the exit code isn't zero.</h2>
-      <p class="lede">stdout, stderr and stdin stream through byte-for-byte and your exit code is preserved. Phantom keeps the last 256 KiB in a ring buffer and does nothing else — until your process exits non-zero or dies from a signal that wasn't your own Ctrl+C.</p>
-    </div>
-
-    <div class="stages" id="stages">
-      <div class="stage rv">
-        <div class="stage-n">01</div>
-        <div>
-          <h3>passthrough</h3>
-          <p>Your command runs exactly as before. A 256 KiB ring buffer holds the tail of the output; overhead is a child-process spawn and nothing else.</p>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">02</div>
-        <div>
-          <h3>capture</h3>
-          <p>On a crash, phantom extracts the stack trace, the output tail, git state and your <code>package.json</code>. Terminal escapes are stripped so paths survive intact and secrets can't hide mid-token.</p>
-          <span class="out">.phantom/crashes/*.json</span>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">03</div>
-        <div>
-          <h3>safety checks</h3>
-          <p>Clean tree? Inside a git repo? Is <code>claude</code> on the PATH? Then, and only then, <code>git checkout -b phantom/fix-&lt;slug&gt;-&lt;ts&gt;</code> from HEAD — before a single edit.</p>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">04</div>
-        <div>
-          <h3>diagnose</h3>
-          <p>A headless <code>claude -p</code> session starts with a minimal tool allowlist, never-touch globs denied, no network and no push path. It runs silently for minutes, so phantom keeps a live line and an elapsed clock on stderr — work looks different from a hang.</p>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">05</div>
-        <div>
-          <h3>failing test first</h3>
-          <p>The session reproduces the crash as a test before it changes any source, so the fix is pinned by something that failed a moment ago.</p>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">06</div>
-        <div>
-          <h3>independent verification</h3>
-          <p>Phantom runs your test command <em>itself</em>, outside the session. If it fails, the session is resumed with the real output — bounded by <code>maxIterations</code> and <code>maxMinutes</code>.</p>
-        </div>
-      </div>
-      <div class="stage rv">
-        <div class="stage-n">07</div>
-        <div>
-          <h3>audit, commit, post-mortem</h3>
-          <p>The branch is audited against the starting commit. Any never-touch hit discards the work. Then a commit on the fix branch, a post-mortem, and you're back on your branch.</p>
-          <span class="out">.phantom/reports/*.md</span>
-        </div>
-      </div>
-    </div>
-
-    <p class="lede rv" style="margin-top:34px">Nothing here trusts the agent's own word. Phantom runs your tests itself and audits the branch after the session ends.</p>
-  </div>
-</section>
-
-<!-- ============================ SAFETY ============================ -->
-<section id="safety">
-  <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">safety rails</div>
-      <h2>An agent with commit access is a bad idea. This one has none.</h2>
-      <p class="lede">Phantom is built on the assumption that the session will eventually do something wrong. Every rail below is enforced mechanically, not requested in a prompt.</p>
-    </div>
-
-    <div class="grid g3 rv">
-      <div class="cell">
-        <h3>never your branch</h3>
-        <p>A fix branch is cut from HEAD before any edit, and your branch is checked back out when phantom finishes — success or failure. The fix exists only as a branch to diff, merge, or delete.</p>
-      </div>
-      <div class="cell">
-        <h3>no pushes, no PRs</h3>
-        <p><code>git push</code> is a denied tool, there is no network tool, and phantom has no push code path. Not configurable.</p>
-      </div>
-      <div class="cell">
-        <h3>minimal tools</h3>
-        <p>An explicit allowlist: read, edit, grep, glob, your test command, <code>node</code>, and read-only git. Everything else is denied without prompting.</p>
-      </div>
-      <div class="cell">
-        <h3>guard hook</h3>
-        <p>A zero-dependency <code>PreToolUse</code> hook that fails closed, inspecting every call for never-touch paths, destructive shell, installs, migrations and state-changing git.</p>
-      </div>
-      <div class="cell">
-        <h3>never-touch, three times over</h3>
-        <p><code>.env</code>, keys, PEM files and secrets are permission deny rules, checked again by the guard hook, then audited afterwards. Any hit hard-reverts the branch.</p>
-      </div>
-      <div class="cell">
-        <h3>isolated session</h3>
-        <p><code>--setting-sources project,local</code>: your user hooks, permission allows, plugins and their MCP servers are never loaded into the recovery session.</p>
-      </div>
-      <div class="cell">
-        <h3>ctrl+c is a kill switch</h3>
-        <p>Kills the process tree, resets and cleans the fix branch, checks out your branch, pops the snapshot stash, exits 130.</p>
-      </div>
-      <div class="cell">
-        <h3>hard caps</h3>
-        <p><code>maxIterations</code> (3) bounds invocations; <code>maxMinutes</code> (15) is a wall-clock timer that kills the child.</p>
-      </div>
-      <div class="cell">
-        <h3>off switch</h3>
-        <p><code>PHANTOM_DISABLED=1</code> turns phantom into a pure passthrough. No flag to remove, no wrapper to unpick.</p>
-      </div>
-    </div>
-
-    <div class="split rv">
-      <div>
-        <div class="slab-label">not a sandbox</div>
-        <p style="color:var(--ink-2);font-size:15.2px">The session may run <code>node</code> — it has to, to run your tests — and a <code>node -e</code> one-liner can in principle read any file your user can. The guard is lexical. Branch isolation, the post-session audit and the no-push rule are the real backstops. Need hard isolation? Run phantom in a container.</p>
-      </div>
-      <div>
-        <div class="slab-label">redaction</div>
-        <p style="color:var(--ink-2);font-size:15.2px">The output tail is scrubbed before the session sees it: <code>KEY=value</code> with secret-looking names, <code>Authorization</code> headers, <code>sk-</code>/<code>ghp_</code>/<code>AKIA</code>/<code>xox</code> tokens, JWTs, URL credentials and PEM blocks. It is pattern-based — a safety net, not a guarantee.</p>
-      </div>
+    <p class="eyebrow rv">what happens</p>
+    <h2 class="rv">Ten steps, and you<br>can stop it at any of them.</h2>
+    <div class="steps rv">
+      <div class="step"><span class="n">01</span><p>Your command runs <b>untouched</b>. stdout, stderr and stdin stream through byte-for-byte; a ring buffer keeps the tail.</p></div>
+      <div class="step"><span class="n">02</span><p>It exits non-zero, or dies from a signal that was not your Ctrl+C.</p></div>
+      <div class="step"><span class="n">03</span><p>Phantom captures the crash — redacted output, stack trace, the files it names, git state — and writes it to <code>.phantom/crashes/</code>.</p></div>
+      <div class="step"><span class="n">04</span><p>A <code>phantom/fix-*</code> branch is cut from HEAD. <b>Nothing before this point has changed your tree.</b></p></div>
+      <div class="step is-fix"><span class="n">05</span><p>A headless Claude Code session starts, with an explicit allowlist, deny rules, and the guard hook watching every tool call.</p></div>
+      <div class="step is-fix"><span class="n">06</span><p>It writes a <b>failing regression test</b> first, then patches until that test passes.</p></div>
+      <div class="step is-fix"><span class="n">07</span><p>Phantom runs your test command <b>itself</b>, outside the session. Claude's claim is never trusted.</p></div>
+      <div class="step is-fix"><span class="n">08</span><p>The crashed command is re-run. Still crashing means <code>unfixed</code>, whatever the suite says.</p></div>
+      <div class="step"><span class="n">09</span><p>A post-mortem is written, the never-touch audit runs, and you are put back on your own branch.</p></div>
+      <div class="step"><span class="n">10</span><p>Your original exit code is returned. A fixed crash is <b>still exit 1</b>.</p></div>
     </div>
   </div>
 </section>
 
-<!-- ============================ OUTPUT ============================ -->
-<section id="output">
-  <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">what you get back</div>
-      <h2>A branch, a banner, and a written account.</h2>
-      <p class="lede">Treat the branch like a PR from a fast contributor who has never seen your codebase: read the report and the diff, run the tests yourself, then merge or delete — phantom asks which, right there in the terminal.</p>
-    </div>
-
-    <div class="split">
-      <div class="rv">
-        <div class="slab-label">on your original branch</div>
-<pre><span class="dim">╭────────────────────────────────────────────────╮</span>
-<span class="dim">│</span> <span class="grn">👻 phantom ✅ fixed</span> · 1m 48s · 34.1k tokens    <span class="dim">│</span>
-<span class="dim">│</span> fix verified by phantom: tests pass and the    <span class="dim">│</span>
-<span class="dim">│</span> command no longer crashes; your branch is      <span class="dim">│</span>
-<span class="dim">│</span> unchanged                                      <span class="dim">│</span>
-<span class="dim">│</span>                                                <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">branch </span> phantom/fix-typeerror-…-k3f9a           <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">review </span> git diff main..phantom/fix-…-k3f9a      <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">accept </span> git merge phantom/fix-…-k3f9a           <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">reject </span> git branch -D phantom/fix-…-k3f9a       <span class="dim">│</span>
-<span class="dim">│</span>                                                <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">report </span> .phantom/reports/20260820-184107-…md    <span class="dim">│</span>
-<span class="dim">│</span> <span class="dim">session</span> 192389b5-…  (claude --resume 192389b5-…)<span class="dim">│</span>
-<span class="dim">╰────────────────────────────────────────────────╯</span>
-
-<span class="dim">phantom ›</span> merge into <span class="wht">main</span>, delete it, or keep it for later? <span class="dim">[m/d/k]</span></pre>
-        <p class="demo-cap">In a terminal it asks; in a pipe, in CI, or under <code>--no-prompt</code> it just prints the commands and exits. Every non-answer — Ctrl+C, EOF, a timeout — leaves the branch untouched. Exit code is always your command's: a fixed crash is still exit 1, so phantom is safe in scripts and <code>&amp;&amp;</code> chains.</p>
-      </div>
-      <div class="rv">
-        <div class="slab-label">.phantom/reports/*.md</div>
-<pre><span class="wht"># 👻 Phantom post-mortem — TypeError: Cannot
-# read properties of undefined (reading 'email')</span>
-
-<span class="dim">&gt;</span> <span class="wht">**Status:**</span> ✅ FIXED
-
-<span class="wht">## TL;DR</span>
-<span class="key">formatOrderLine</span> dereferenced order.customer.email
-unconditionally, and a guest checkout in
-data/orders.json has no customer. Optional
-chaining with a (guest) fallback; test added.
-
-<span class="wht">## Verification (independent)</span>
-Tests run by phantom     <span class="grn">✅ passed — npm test</span>
-Crashed command re-run   <span class="grn">✅ exits 0 — npm start</span>
-Files changed            src/report.js,
-                         test/report.test.js
-Never-touch audit        <span class="grn">✅ clean</span>
-Wall clock               1m 48s</pre>
-        <p class="demo-cap">The verification table and metadata are written by phantom, not the session.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ USAGE ============================ -->
+<!-- ============================ SURFACE ============================ -->
 <section id="usage">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">usage</div>
-      <h2>Flags before the command. Everything after it is yours.</h2>
-      <p class="lede"><code>phantom [flags] [--] &lt;command&gt; [args...]</code> — everything after the command passes through verbatim, so <code>phantom npm run dev --verbose</code> gives <code>--verbose</code> to npm.</p>
-    </div>
+    <p class="eyebrow rv">the surface</p>
+    <h2 class="rv">Five commands is<br>the whole thing.</h2>
+
     <div class="tw rv">
       <table>
-        <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td class="f">--dry-run</td><td>Diagnose and propose a diff; no branch, no edits. The CI-safe mode.</td></tr>
-          <tr><td class="f">--allow-dirty</td><td>Proceed with uncommitted changes after taking a stash snapshot.</td></tr>
-          <tr><td class="f">--test &lt;cmd&gt;</td><td>Verification command, overriding config and <code>package.json</code>.</td></tr>
-          <tr><td class="f">--max-iterations &lt;n&gt;</td><td>Cap on Claude invocations. Default 3, max 10.</td></tr>
-          <tr><td class="f">--max-minutes &lt;n&gt;</td><td>Wall-clock cap for the recovery. Default 15, max 120.</td></tr>
-          <tr><td class="f">--model &lt;m&gt;</td><td>Passed through as <code>claude --model &lt;m&gt;</code>.</td></tr>
-          <tr><td class="f">--no-commit</td><td>Leave the fix uncommitted on the phantom branch and print the way back.</td></tr>
-          <tr><td class="f">--no-prompt</td><td>Never ask whether to merge or delete the fix branch; just print the commands.</td></tr>
-          <tr><td class="f">--notify</td><td>Desktop notification on crash and when recovery ends.</td></tr>
-          <tr><td class="f">--webhook &lt;url&gt;</td><td>POST a JSON summary when recovery ends.</td></tr>
-          <tr><td class="f">--config &lt;path&gt;</td><td>Use this config file instead of searching. A missing file is an error, not a silent fallback.</td></tr>
-          <tr><td class="f">--verbose</td><td>Stream the session's progress lines.</td></tr>
+          <tr><td class="f">phantom &lt;cmd&gt;</td><td>Wrap anything. Flags go before the command; everything after it passes through verbatim.</td></tr>
+          <tr><td class="f">phantom doctor</td><td>Run this before your first crash. Checks that <code>claude</code> is installed <em>and logged in</em>, that this is a git repo with a commit, what test command it would run, and whether notifications can reach you.</td></tr>
+          <tr><td class="f">phantom ls</td><td>This repo's fix branches, crash captures and post-mortems. Writes to stdout; <code>--json</code> for the whole state.</td></tr>
+          <tr><td class="f">phantom clean</td><td>Prunes them. Merged branches only by default — deletion goes through <code>git branch -d</code>, so a stale plan fails instead of destroying work.</td></tr>
+          <tr><td class="f">phantom recover</td><td>Replays a crash phantom already captured, without waiting for it to happen again.</td></tr>
         </tbody>
       </table>
-      <p class="demo-cap" style="margin-top:14px">Every boolean negates — <code>--commit</code>, <code>--prompt</code>, <code>--no-notify</code>, <code>--verify</code> — so a setting in your config file can be turned off for one run. Settings also come from the environment (<code>PHANTOM_MODEL</code>, <code>PHANTOM_MAX_COST_USD</code>, and a dozen more), which sits between the flags and the files.</p>
     </div>
 
-    <div class="tw rv" style="margin-top:26px">
-      <table>
-        <thead><tr><th>Subcommand</th><th>What it does</th></tr></thead>
-        <tbody>
-          <tr><td class="f">phantom doctor</td><td>Checks everything a recovery needs <em>before</em> your first crash: claude installed <em>and logged in</em>, a git repo with a commit, the test command it would run, whether notifications can reach you, status line and plugin wiring.</td></tr>
-          <tr><td class="f">phantom ls</td><td>This repo's fix branches, crash captures and post-mortems, newest first.</td></tr>
-          <tr><td class="f">phantom clean</td><td>Prunes them. Merged branches only by default; an unmerged fix branch needs <code>--unmerged</code>. Deletion goes through <code>git branch -d</code>, so a stale plan fails instead of destroying work.</td></tr>
-          <tr><td class="f">phantom recover</td><td>Replays a crash phantom already captured, without waiting for it to happen again — for retrying a recovery that was refused.</td></tr>
-        </tbody>
-      </table>
-      <p class="demo-cap" style="margin-top:14px"><code>phantom -- ls -la</code> still wraps the real <code>ls</code>; the separator is the escape hatch.</p>
+    <div class="cards three rv">
+      <div class="card"><span class="k">dry run</span><p><code>--dry-run</code> diagnoses and proposes a diff with no branch and no edits. The CI-safe mode — and phantom now checks afterwards that the session really did change nothing.</p></div>
+      <div class="card"><span class="k">every flag negates</span><p><code>--commit</code>, <code>--prompt</code>, <code>--no-notify</code>, <code>--verify</code>. A setting in your config file can be turned off for a single run without editing it.</p></div>
+      <div class="card"><span class="k">configured anywhere</span><p><code>.phantomrc</code>, a <code>package.json</code> field, or fourteen <code>PHANTOM_*</code> variables. Precedence: flags &gt; environment &gt; file &gt; defaults.</p></div>
     </div>
-
-    <div class="split" style="margin-top:26px">
-      <div class="rv">
-        <div class="slab-label">.phantomrc — every key at its default</div>
-<pre>{
-  <span class="key">"testCommand"</span>:     null,   <span class="dim">// auto: "npm test"</span>
-  <span class="key">"maxIterations"</span>:   3,
-  <span class="key">"maxMinutes"</span>:      15,
-  <span class="key">"neverTouch"</span>:      [".env", ".env.*", "**/*.pem",
-                      "**/*.key", "**/secrets/**",
-                      "**/*.secret*"],
-  <span class="key">"webhook"</span>:         null,
-  <span class="key">"notify"</span>:          false,
-  <span class="key">"model"</span>:           null,
-  <span class="key">"autoCommit"</span>:      true,
-  <span class="key">"promptOnFinish"</span>:  true,
-  <span class="key">"verifyCommand"</span>:   true,   <span class="dim">// re-run the crashed command</span>
-  <span class="key">"reportDir"</span>:       ".phantom/reports",
-  <span class="key">"ringBufferBytes"</span>: 262144,
-  <span class="key">"keepReports"</span>:     50,     <span class="dim">// 0 keeps everything</span>
-  <span class="key">"maxTokens"</span>:       null,   <span class="dim">// spend ceiling, tokens</span>
-  <span class="key">"maxCostUsd"</span>:      null,   <span class="dim">// spend ceiling, est. USD</span>
-  <span class="key">"claudeBin"</span>:       "claude"
-}</pre>
-      </div>
-      <div class="rv">
-        <div class="slab-label">exit codes</div>
-        <div class="tw" style="margin-top:0">
-          <table style="min-width:0">
-            <tbody>
-              <tr><td class="f">your code</td><td>Always. A fixed crash is still exit 1.</td></tr>
-              <tr><td class="f">128 + sig</td><td>Signal deaths, like a shell. SIGSEGV → 139.</td></tr>
-              <tr><td class="f">127 / 126</td><td>Command not found / could not be spawned.</td></tr>
-              <tr><td class="f">130 / 143 / 129</td><td>Ctrl+C, SIGTERM, SIGHUP during recovery.</td></tr>
-              <tr><td class="f">2</td><td>Invalid flags or config — before your command runs.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="demo-cap" style="margin-top:14px">Config precedence: flags &gt; <code>.phantomrc</code> &gt; <code>package.json</code> &gt; defaults. Both files are looked for in the directory you ran from first, then at the git root — first hit wins, no merging.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ INTEGRATION ============================ -->
-<section id="integration">
-  <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">claude code integration</div>
-      <h2>Phantom runs in one terminal. You're chatting in another.</h2>
-      <p class="lede">Three optional bridges, all reading <code>.phantom/events.jsonl</code> — git-excluded, capped at 200 lines, events older than 24 h ignored, nothing sent anywhere.</p>
-    </div>
-    <div class="grid g3 rv">
-      <div class="cell">
-        <h3>plugin hooks</h3>
-        <p>Claude opens your next reply with <em>👻 phantom: <code>npm run dev</code> crashed 3m ago — fixed on <code>phantom/fix-…</code></em>, offers the diff and the report, then carries on with what you asked.</p>
-        <p style="font-family:var(--mono);font-size:11.5px;color:var(--ink-3)">on your next message</p>
-      </div>
-      <div class="cell">
-        <h3>status line</h3>
-        <p><code>👻 fixing npm run dev…</code> then <code>👻 fixed → phantom/fix-…</code> in the status bar until seen.</p>
-        <p style="font-family:var(--mono);font-size:11.5px;color:var(--ink-3)">next redraw</p>
-      </div>
-      <div class="cell">
-        <h3>desktop notification</h3>
-        <p>Crash detected, then fixed — with the branch name. macOS, Linux, best-effort, 4 s timeout, never delays a recovery.</p>
-        <p style="font-family:var(--mono);font-size:11.5px;color:var(--ink-3)">instantly</p>
-      </div>
-    </div>
-    <div class="rv" style="margin-top:26px">
-<pre><span class="dim"># inside Claude Code</span>
-/plugin marketplace add waazy-w/claude-phantom
-/plugin install phantom@claude-phantom
-
-<span class="dim"># ~/.claude/settings.json — 👻 in the status bar</span>
-{ <span class="key">"statusLine"</span>: { <span class="key">"type"</span>: "command", <span class="key">"command"</span>: "phantom-status" } }</pre>
-    </div>
-    <p class="lede rv" style="margin-top:22px">Claude Code can't be interrupted from outside, so the chat message always lands on your next turn. Use the status line or a notification if you want to know instantly.</p>
-    <p class="lede rv" style="margin-top:14px">The CLI and the plugin ship together on one version, and update separately: <code>npm update -g claude-phantom</code>, and <code>claude plugin update phantom@claude-phantom</code> after <code>claude plugin marketplace update claude-phantom</code>. Neither one announces a release and phantom never phones home, so <a href="https://github.com/waazy-w/claude-phantom">watch the repo</a> — <em>Watch → Custom → Releases</em> — and GitHub mails you once per version.</p>
   </div>
 </section>
 
 <!-- ============================ LIMITS ============================ -->
 <section id="limits">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">known limitations</div>
-      <h2>Where it doesn't work.</h2>
-      <p class="lede">Straight from the README, because finding this out at 2am is worse than reading it now.</p>
+    <div class="split narrow-first">
+      <div>
+        <p class="eyebrow rv">what it is not</p>
+        <h2 class="rv">The honest part.</h2>
+        <p class="lede rv" style="margin-top:20px">Nothing here is a caveat buried in a footnote. If one of these is a dealbreaker, better you find out now than after a recovery.</p>
+      </div>
+      <div class="rv">
+        <div class="cards">
+          <div class="card"><span class="k">git required</span><p>Outside a repo, phantom passes the command through and says why it is not recovering. There is no way to undo a bad session without git.</p></div>
+          <div class="card"><span class="k">non-deterministic</span><p>Claude may fail. You get <code>unfixed</code> or <code>timeout</code>, your branch untouched, and a report saying what was tried.</p></div>
+          <div class="card"><span class="k">best on node/js</span><p>Patching works anywhere Claude Code can edit, but verification needs a test command and the crash heuristics are tuned for Node traces first.</p></div>
+          <div class="card"><span class="k">it costs real money</span><p>Every recovery is a genuine session on your plan or API key. Set <code>maxCostUsd</code> if that matters — the dollar figure phantom shows is an estimate from published rates, not your bill.</p></div>
+          <div class="card"><span class="k">daemons keep it waiting</span><p>A child that never closes stdout keeps phantom waiting. Wrap foreground processes.</p></div>
+        </div>
+      </div>
     </div>
-    <div class="limits rv">
-      <div><b>exit-based detection only</b>Supervisors that swallow the crash — <code>nodemon</code>, <code>pm2</code>, <code>--watch</code> — aren't detected. Wrap the underlying command instead.</div>
-      <div><b>git required</b>Outside a repo, phantom only passes the command through.</div>
-      <div><b>non-deterministic</b>Claude may fail. The branch is marked <code>unfixed</code> or <code>timeout</code>, you're back on your branch, and the report says what was tried.</div>
-      <div><b>best on node/js</b>Patching works anywhere Claude Code can edit, but verification needs a test command and the crash heuristics are tuned for Node traces first.</div>
-      <div><b>windows has one gap</b>The full suite runs on windows-latest in CI, on node 18/20/22/24. Six tests skip: libuv maps every signal onto TerminateProcess, so a killed child reports no signal and a handler cannot run. The guard hook itself is registered on Windows since 0.3.5, so the Bash rails are the same on all three platforms. And phantom wraps programs, not shell lines, so <code>phantom dir</code> and other cmd built-ins are not wrapped, the same as on POSIX.</div>
-      <div><b>not a sandbox</b>The session inherits your environment variables and can run <code>node</code>.</div>
-      <div><b>redaction is pattern-based</b>Unusual secret formats get through.</div>
-      <div><b>your app sees a pipe, not a TTY</b>Set <code>FORCE_COLOR=1</code> or equivalent to keep colours.</div>
-      <div><b>uses your Claude billing</b>Every recovery is a real session on your plan or API key.</div>
-      <div><b>daemons keep it waiting</b>A child that keeps stdout open keeps phantom waiting. Run foreground processes.</div>
+  </div>
+</section>
+
+<!-- ============================ PROOF ============================ -->
+<section id="proof">
+  <div class="wrap">
+    <p class="eyebrow rv">why trust it</p>
+    <h2 class="rv">It was audited harder<br>than it advertises.</h2>
+    <p class="lede rv" style="margin-top:20px">Phantom is a tool that edits your code while you are not watching. That only deserves trust if the thing itself is held to a standard, so it is: every fix ships with a regression test, and every test is broken on purpose to prove it fails before it is allowed to pass.</p>
+
+    <div class="stats rv">
+      <div class="stat"><b data-count="532">532</b><span>tests, run on 3 platforms × Node 18/20/22/24</span></div>
+      <div class="stat"><b data-count="53">53</b><span>findings from a full audit of the tool itself</span></div>
+      <div class="stat"><b data-count="0">0</b><span>runtime dependencies, by rule</span></div>
+      <div class="stat"><b data-count="15">15</b><span>CI jobs green before anything ships</span></div>
     </div>
+
+    <p class="fine rv" style="margin-top:26px;max-width:62ch">The release notes name what was broken rather than burying it — including the release where following phantom's own printed recovery instructions could destroy your uncommitted work. That bug is fixed, pinned by a test that executes the printed advice verbatim, and written up in full in the changelog.</p>
   </div>
 </section>
 
 <!-- ============================ FAQ ============================ -->
 <section id="faq">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow">faq</div>
-      <h2>The questions people actually ask.</h2>
-    </div>
-    <div class="faq rv">
-      <details>
-        <summary>Does it ever push?</summary>
-        <div class="a">No — denied tool, no network tool, no push code path, no flag.</div>
-      </details>
-      <details>
-        <summary>Can it touch my .env?</summary>
-        <div class="a">No. <code>.env</code> and <code>.env.*</code> are never-touch by default, enforced as permission deny rules, by the guard hook on every call, and by a post-session audit that hard-reverts the branch on any hit. Watch your own log output though — the redactor is pattern-based.</div>
-      </details>
-      <details>
-        <summary>I'm mid-change. What happens?</summary>
-        <div class="a">Phantom refuses on a dirty tree. <code>--allow-dirty</code> stashes a snapshot first and restores it automatically, including on Ctrl+C.</div>
-      </details>
-      <details>
-        <summary>How much does it cost?</summary>
-        <div class="a">One to three headless turns plus test runs, bounded by <code>maxIterations</code> and <code>maxMinutes</code> — roughly a short interactive debugging session. <code>maxIterations: 1</code> and a cheaper <code>model</code> give you a hard ceiling.</div>
-      </details>
-      <details>
-        <summary>Can I use it in CI?</summary>
-        <div class="a">Use <code>--dry-run</code>: diagnosis and a proposed diff land in <code>.phantom/reports/</code>, with no branch and no edits. Upload <code>.phantom/</code> as an artifact. Full mode works too, but the branch dies with the runner since nothing is pushed.</div>
-      </details>
-      <details>
-        <summary>What's the overhead when nothing crashes?</summary>
-        <div class="a">None measurable — a child-process spawn with piped stdio and a bounded buffer. A 50 MB log flood is in the test suite.</div>
-      </details>
-      <details>
-        <summary>Can I run it from inside Claude Code?</summary>
-        <div class="a">Yes. Phantom strips <code>CLAUDECODE</code> from the environment before spawning the headless session, so nesting works.</div>
-      </details>
-      <details>
-        <summary>What can the session actually see?</summary>
-        <div class="a">Your tracked and untracked source minus never-touch globs, a redacted slice of the crash output (the last 200 lines, capped at 24 KiB — the 256 KiB ring buffer is what phantom <em>retains</em>, not what the session is shown), read-only git history, your <code>package.json</code> name and scripts, your test output, and — like any CLI — your environment variables. It can never read or write a never-touch file, push, open a PR, use the network, change branches, install packages, or commit to your branch.</div>
-      </details>
+    <p class="eyebrow rv">questions</p>
+    <h2 class="rv">Reasonable doubts.</h2>
+    <div class="qa rv" style="margin-top:32px">
+      <details><summary>Does it ever push?</summary><div class="a"><p>No. It is a denied tool, there is no network tool, there is no push code path, and there is no flag. Not configurable.</p></div></details>
+      <details><summary>Can it touch my <code>.env</code>?</summary><div class="a"><p>No — enforced as permission deny rules, by the guard hook on every call, and by a post-session audit that hard-reverts the branch on any hit. Watch your own log output though: the redactor is pattern-based.</p></div></details>
+      <details><summary>I'm mid-change.</summary><div class="a"><p>Phantom refuses on a dirty tree. <code>--allow-dirty</code> stashes a snapshot first and restores it after — including on Ctrl+C — and the command it prints to restore it names the stash by full sha, so a stash pushed meanwhile by another shell cannot be popped by mistake.</p></div></details>
+      <details><summary>How much does it cost?</summary><div class="a"><p>One to three headless turns plus test runs — roughly a short interactive debugging session. <code>maxIterations</code> and <code>maxMinutes</code> bound how often it asks and how long it waits; for an actual ceiling on spend, set <code>maxTokens</code> or <code>maxCostUsd</code>.</p></div></details>
+      <details><summary>Can I use it in CI?</summary><div class="a"><p>Use <code>--dry-run</code>: diagnosis and a proposed diff land in <code>.phantom/reports/</code> with no branch and no edits. Upload <code>.phantom/</code> as an artifact. Full mode works, but the branch dies with the runner since nothing is pushed.</p></div></details>
+      <details><summary>From inside Claude Code?</summary><div class="a"><p>Yes, and it does the right thing: a tool call times out long before a recovery finishes, so phantom captures the crash and hands it to <code>/phantom:recover</code> instead of starting a session that would be killed halfway. The recovery session also never inherits the parent session's environment.</p></div></details>
+      <details><summary>What is the overhead when nothing crashes?</summary><div class="a"><p>A child-process spawn with piped stdio and a bounded buffer. A 50 MB log flood is in the test suite.</p></div></details>
     </div>
   </div>
 </section>
@@ -1112,414 +450,125 @@ Wall clock               1m 48s</pre>
 <!-- ============================ CTA ============================ -->
 <section class="cta" id="install">
   <div class="wrap">
-    <div class="rv">
-      <div class="eyebrow" style="justify-content:center">get started</div>
-      <h2>Leave it wrapped. Forget it's there.</h2>
-      <p class="lede" style="margin-left:auto;margin-right:auto">You need Node 18+, git, and the Claude Code CLI logged in once. That's the whole setup.</p>
-
-      <div class="install" style="margin-bottom:6px">
-        <div class="cmd">
-          <span class="pr">$</span>
-          <span class="txt" id="c3">npm install -g @anthropic-ai/claude-code &amp;&amp; claude</span>
-          <button class="copy" data-c="c3">copy</button>
-        </div>
-      </div>
-      <p class="cta-note" style="margin:0 0 22px">…then pick how you want phantom itself.</p>
-
-      <div class="tabs" role="tablist" aria-label="Install method">
-        <button role="tab" id="tab-npm" aria-controls="pane-npm" aria-selected="true">npm</button>
-        <button role="tab" id="tab-gh" aria-controls="pane-gh" aria-selected="false">github</button>
-        <button role="tab" id="tab-clone" aria-controls="pane-clone" aria-selected="false">clone</button>
-        <button role="tab" id="tab-plugin" aria-controls="pane-plugin" aria-selected="false">plugin</button>
-      </div>
-
-      <div class="pane" id="pane-npm" role="tabpanel" aria-labelledby="tab-npm">
-        <div class="install">
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c4">npm install -g claude-phantom</span>
-            <button class="copy" data-c="c4">copy</button>
-          </div>
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c5">phantom npm run dev</span>
-            <button class="copy" data-c="c5">copy</button>
-          </div>
-        </div>
-        <p class="pane-note">The published release. Zero dependencies, so it's a single fast install.</p>
-      </div>
-
-      <div class="pane" id="pane-gh" role="tabpanel" aria-labelledby="tab-gh" hidden>
-        <div class="install">
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c6">npm install -g github:waazy-w/claude-phantom</span>
-            <button class="copy" data-c="c6">copy</button>
-          </div>
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c7">phantom npm run dev</span>
-            <button class="copy" data-c="c7">copy</button>
-          </div>
-        </div>
-        <p class="pane-note">Straight from <code>main</code> — ahead of npm, and how you get a fix before it ships.</p>
-      </div>
-
-      <div class="pane" id="pane-clone" role="tabpanel" aria-labelledby="tab-clone" hidden>
-        <div class="install">
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c8">git clone https://github.com/waazy-w/claude-phantom</span>
-            <button class="copy" data-c="c8">copy</button>
-          </div>
-          <div class="cmd">
-            <span class="pr">$</span>
-            <span class="txt" id="c9">cd claude-phantom &amp;&amp; npm link &amp;&amp; npm test</span>
-            <button class="copy" data-c="c9">copy</button>
-          </div>
-        </div>
-        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 532 tests, no install step.</p>
-      </div>
-
-      <div class="pane" id="pane-plugin" role="tabpanel" aria-labelledby="tab-plugin" hidden>
-        <div class="install">
-          <div class="cmd">
-            <span class="pr">&rsaquo;</span>
-            <span class="txt" id="c10">/plugin marketplace add waazy-w/claude-phantom</span>
-            <button class="copy" data-c="c10">copy</button>
-          </div>
-          <div class="cmd">
-            <span class="pr">&rsaquo;</span>
-            <span class="txt" id="c11">/plugin install phantom@claude-phantom</span>
-            <button class="copy" data-c="c11">copy</button>
-          </div>
-        </div>
-        <p class="pane-note">Typed inside Claude Code, not your shell — then restart. Anyone can add it; there is no review queue. Gives you <code>/phantom:recover</code>, the crash-recovery skill, and the briefing hooks.</p>
-      </div>
-
-      <p class="cta-note" style="margin-top:24px">PHANTOM_DISABLED=1 turns it back into a pure passthrough.</p>
+    <h2 class="rv">Wrap one command.<br><span style="color:var(--phos)">Forget about it.</span></h2>
+    <p class="lede rv" style="margin-top:20px">Then run <code>phantom doctor</code> once, before your first crash.</p>
+    <div class="install rv">
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c3">npm install -g claude-phantom</span><button class="copy" data-c="c3">copy</button></div>
+      <div class="cmd"><span class="pr">$</span><span class="txt" id="c4">phantom doctor</span><button class="copy" data-c="c4">copy</button></div>
     </div>
+    <p class="fine rv" style="margin-top:20px">Also installable as a Claude Code plugin — <code>/plugin marketplace add waazy-w/claude-phantom</code></p>
   </div>
 </section>
 
 <footer>
-  <div class="wrap" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;width:100%">
-    <div class="ghost-note">
-      <svg viewBox="0 0 256 256" aria-hidden="true"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
+  <div class="wrap">
+    <div class="foot">
       <span>claude-phantom 0.7.0 — MIT</span>
+      <nav>
+        <a href="https://github.com/waazy-w/claude-phantom">GitHub</a>
+        <a href="https://www.npmjs.com/package/claude-phantom">npm</a>
+        <a href="https://github.com/waazy-w/claude-phantom/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/waazy-w/claude-phantom#readme">Docs</a>
+      </nav>
     </div>
-    <nav>
-      <a href="https://github.com/waazy-w/claude-phantom">github</a>
-      <a href="https://www.npmjs.com/package/claude-phantom">npm</a>
-      <a href="#how">how it works</a>
-      <a href="#safety">safety</a>
-      <a href="#faq">faq</a>
-      <a href="#top">top</a>
-    </nav>
   </div>
 </footer>
 
-</main>
-</div>
-
 <script>
+document.documentElement.classList.remove('no-js');
 (function () {
   'use strict';
-  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* ---------- theme: light / system / dark, remembered per viewer ---------- */
-  var THEME_KEY = 'phantom-theme';
-  var thBtns = { light: document.getElementById('thLight'), system: document.getElementById('thSystem'), dark: document.getElementById('thDark') };
-
-  function applyTheme(mode) {
-    var r = document.documentElement;
-    if (mode === 'system') r.removeAttribute('data-theme');
-    else r.setAttribute('data-theme', mode);
-    Object.keys(thBtns).forEach(function (k) {
-      thBtns[k].setAttribute('aria-pressed', String(k === mode));
-    });
-  }
-
-  var stored = 'system';
-  try { stored = localStorage.getItem(THEME_KEY) || 'system'; } catch (e) { stored = 'system'; }
-  if (stored !== 'light' && stored !== 'dark') stored = 'system';
-  applyTheme(stored);
-
-  Object.keys(thBtns).forEach(function (k) {
-    thBtns[k].addEventListener('click', function () {
-      applyTheme(k);
-      try { localStorage.setItem(THEME_KEY, k); } catch (e) { /* private mode: session-only */ }
-      /* the ambient canvas reads its colours from the tokens */
-      if (typeof repaintStatic === 'function') repaintStatic();
-    });
-  });
-
-  /* ---------- copy buttons ---------- */
-  document.querySelectorAll('.copy').forEach(function (b) {
-    b.addEventListener('click', function () {
-      var el = document.getElementById(b.dataset.c);
-      if (!el) return;
-      var t = el.textContent;
-      var done = function () {
-        b.textContent = 'copied'; b.classList.add('done');
-        setTimeout(function () { b.textContent = 'copy'; b.classList.remove('done'); }, 1400);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(t).then(done, done);
-      } else { done(); }
-    });
-  });
-
-  /* ---------- install method tabs ---------- */
-  var TABS = [['tab-npm', 'pane-npm'], ['tab-gh', 'pane-gh'], ['tab-clone', 'pane-clone'], ['tab-plugin', 'pane-plugin']];
-  function selectTab(id) {
-    TABS.forEach(function (p) {
-      var on = p[0] === id;
-      document.getElementById(p[0]).setAttribute('aria-selected', String(on));
-      document.getElementById(p[1]).hidden = !on;
-    });
-  }
-  TABS.forEach(function (p, i) {
-    var b = document.getElementById(p[0]);
-    b.addEventListener('click', function () { selectTab(p[0]); });
-    b.addEventListener('keydown', function (e) {
-      var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-      if (!d) return;
-      e.preventDefault();
-      var n = TABS[(i + d + TABS.length) % TABS.length];
-      selectTab(n[0]);
-      document.getElementById(n[0]).focus();
-    });
-  });
-
-  /* ---------- reveal on scroll ---------- */
+  /* Reveal on scroll. IntersectionObserver rather than a scroll handler so the
+     browser does the work; no library, because a landing page's fades do not
+     justify a dependency that can fail to load and leave the page blank. */
   var rv = document.querySelectorAll('.rv');
-  if (reduce || !('IntersectionObserver' in window)) {
-    rv.forEach(function (n) { n.classList.add('in'); });
+  if (!('IntersectionObserver' in window) || reduce) {
+    rv.forEach(function (el) { el.classList.add('in'); });
   } else {
-    var io = new IntersectionObserver(function (es) {
-      es.forEach(function (e) {
-        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e, i) {
+        if (!e.isIntersecting) return;
+        // Stagger siblings slightly so a section arrives as a group, not a wall.
+        setTimeout(function () { e.target.classList.add('in'); }, Math.min(i * 60, 240));
+        io.unobserve(e.target);
       });
-    }, { rootMargin: '0px 0px -8% 0px', threshold: .06 });
-    rv.forEach(function (n, i) { n.style.transitionDelay = (Math.min(i % 4, 3) * 55) + 'ms'; io.observe(n); });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    rv.forEach(function (el) { io.observe(el); });
   }
 
-  /* ---------- scroll rail: phantom rides the pipeline ---------- */
-  var rail = document.getElementById('rail');
-  var fill = document.getElementById('railFill');
-  var mark = document.getElementById('railMark');
-  var dotsWrap = document.getElementById('railDots');
-  var sections = Array.prototype.slice.call(document.querySelectorAll('main section'));
-  var dots = sections.map(function (s, i) {
-    var d = document.createElement('div');
-    d.className = 'rail-dot';
-    dotsWrap.appendChild(d);
-    return d;
-  });
-
-  function layoutDots() {
-    var h = dotsWrap.offsetHeight;
-    var docH = document.documentElement.scrollHeight - window.innerHeight;
-    sections.forEach(function (s, i) {
-      var p = docH > 0 ? Math.min(1, s.offsetTop / docH) : 0;
-      dots[i].style.top = (p * h) + 'px';
-    });
-  }
-
+  /* The rail fills as you read: crimson at the crash, phosphor by the end. */
+  var rail = document.querySelector('.rail');
   var ticking = false;
-  function onScroll() {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () {
-      ticking = false;
-      var docH = document.documentElement.scrollHeight - window.innerHeight;
-      var p = docH > 0 ? Math.min(1, Math.max(0, window.scrollY / docH)) : 0;
-      var h = dotsWrap.offsetHeight;
-      fill.style.height = (p * h) + 'px';
-      mark.style.transform = 'translateY(' + (p * h) + 'px)';
-      if (p > 0.004) rail.classList.add('lit'); else rail.classList.remove('lit');
-      var y = window.scrollY + window.innerHeight * 0.42;
-      sections.forEach(function (s, i) {
-        var on = y >= s.offsetTop && y < s.offsetTop + s.offsetHeight;
-        dots[i].classList.toggle('on', on);
-      });
-      glowT = p;
+  function drawRail() {
+    var h = document.documentElement.scrollHeight - innerHeight;
+    var pct = h > 0 ? (scrollY / h) * 100 : 0;
+    rail.style.setProperty('--progress', Math.max(0, Math.min(100, pct)) + '%');
+    ticking = false;
+  }
+  addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; requestAnimationFrame(drawRail); }
+  }, { passive: true });
+  drawRail();
+
+  /* Copy buttons. execCommand is the fallback for non-secure origins, where
+     navigator.clipboard is simply absent. */
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = document.getElementById(btn.dataset.c).textContent;
+      var done = function () {
+        btn.textContent = 'copied';
+        btn.classList.add('done');
+        setTimeout(function () { btn.textContent = 'copy'; btn.classList.remove('done'); }, 1600);
+      };
+      if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function () {}); return; }
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { /* clipboard unavailable */ }
+      document.body.removeChild(ta);
     });
-  }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  window.addEventListener('resize', function () { layoutDots(); onScroll(); });
-  layoutDots(); onScroll();
-
-  /* ---------- ambient phosphor field ---------- */
-  var glowT = 0;
-  var cv = document.getElementById('phosphor');
-  var ctx = cv.getContext('2d');
-  var W = 0, H = 0, dpr = 1, cols = [], raf = 0;
-
-  function sizeCanvas() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = cv.clientWidth; H = cv.clientHeight;
-    cv.width = Math.floor(W * dpr); cv.height = Math.floor(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var n = Math.max(10, Math.floor(W / 82));
-    cols = [];
-    for (var i = 0; i < n; i++) {
-      cols.push({
-        x: (i + 0.5) * (W / n) + (i * 37 % 23) - 11,
-        y: ((i * 91) % 100) / 100 * H,
-        len: 70 + (i * 53 % 130),
-        sp: 0.16 + ((i * 29) % 40) / 100,
-        a: 0.05 + ((i * 17) % 26) / 460
-      });
-    }
-  }
-
-  function palette() {
-    var cs = getComputedStyle(document.documentElement);
-    return {
-      rgb: (cs.getPropertyValue('--canvas-rgb') || '46,229,157').trim(),
-      glow: (cs.getPropertyValue('--canvas-glow') || 'rgba(46,229,157,0.1)').trim()
-    };
-  }
-
-  function draw() {
-    var pal = palette();
-    ctx.clearRect(0, 0, W, H);
-
-    /* a slow glow that tracks scroll depth — the recovery "warming up" */
-    var gy = H * (0.16 + glowT * 0.7);
-    var g = ctx.createRadialGradient(W * 0.5, gy, 0, W * 0.5, gy, Math.max(W, H) * 0.62);
-    g.addColorStop(0, pal.glow);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-
-    /* falling phosphor streaks */
-    for (var i = 0; i < cols.length; i++) {
-      var c = cols[i];
-      var grad = ctx.createLinearGradient(c.x, c.y - c.len, c.x, c.y);
-      var base = pal.rgb;
-      grad.addColorStop(0, 'rgba(' + base + ',0)');
-      grad.addColorStop(1, 'rgba(' + base + ',' + (c.a * 1.35) + ')');
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(c.x, c.y - c.len);
-      ctx.lineTo(c.x, c.y);
-      ctx.stroke();
-      c.y += c.sp;
-      if (c.y - c.len > H) { c.y = -((i * 61) % 180); }
-    }
-    raf = requestAnimationFrame(draw);
-  }
-
-  function repaintStatic() {
-    if (!reduce) return;              /* the animation loop repaints on its own */
-    var gy = H * 0.3;
-    ctx.clearRect(0, 0, W, H);
-    var g2 = ctx.createRadialGradient(W * 0.5, gy, 0, W * 0.5, gy, Math.max(W, H) * 0.62);
-    g2.addColorStop(0, palette().glow);
-    g2.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g2; ctx.fillRect(0, 0, W, H);
-  }
-
-  sizeCanvas();
-  window.addEventListener('resize', function () { sizeCanvas(); repaintStatic(); });
-  if (!reduce) { draw(); } else { repaintStatic(); }
-  document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
-    else if (!reduce && !raf) { draw(); }
   });
 
-  /* ---------- hero terminal ---------- */
-  var SCRIPT = [
-    { t: '$ ', c: 'grn' }, { t: 'phantom npm start\n' },
-    { d: 240 },
-    { t: '\n> crash-demo@1.0.0 start\n> node src/server.js\n', c: 'dim' },
-    { d: 200 },
-    { t: '\nreport ready: 4 orders\n', c: 'dim' },
-    { d: 320 },
-    { t: '/app/src/report.js:9\n', c: 'dim' },
-    { t: "TypeError: Cannot read properties of undefined (reading 'email')\n", c: 'red' },
-    { t: '    at formatOrderLine (/app/src/report.js:9:33)\n', c: 'dim' },
-    { d: 520 },
-    { t: '\n👻 phantom: crash detected', c: 'wht' }, { t: ' — npm start exited 1\n', c: 'dim' },
-    { d: 300 },
-    { t: '   branch  ', c: 'dim' }, { t: 'phantom/fix-typeerror-…-k3f9a2\n', c: 'wht' },
-    { d: 240 },
-    { t: '   ', c: 'dim' }, { t: '→ diagnosing', c: 'yel' }, { t: ' ..............', c: 'dim' }, { t: ' ok\n', c: 'grn' },
-    { d: 260 },
-    { t: '   ', c: 'dim' }, { t: '→ failing test', c: 'yel' }, { t: ' .............', c: 'dim' }, { t: ' ok\n', c: 'grn' },
-    { d: 260 },
-    { t: '   ', c: 'dim' }, { t: '→ patching', c: 'yel' }, { t: ' .................', c: 'dim' }, { t: ' ok\n', c: 'grn' },
-    { d: 300 },
-    { t: '   ', c: 'dim' }, { t: '→ npm test', c: 'yel' }, { t: ' ................. ', c: 'dim' }, { t: '5 passed\n', c: 'grn' },
-    { d: 320 },
-    { t: '   ', c: 'dim' }, { t: '→ never-touch audit', c: 'yel' }, { t: ' ........', c: 'dim' }, { t: ' clean\n', c: 'grn' },
-    { d: 420 },
-    { t: '\nphantom: ✅ FIXED', c: 'grn' }, { t: '  1 iteration · 1m 48s\n', c: 'dim' },
-    { t: '   review  ', c: 'dim' }, { t: 'git diff main..phantom/fix-…\n', c: 'wht' },
-    { t: '   report  ', c: 'dim' }, { t: '.phantom/reports/20260820-184107-…md\n', c: 'wht' },
-    { d: 300 },
-    { t: '\n$ ', c: 'grn' }
-  ];
-
-  var out = document.getElementById('typer');
-  function renderAll() {
-    var html = '';
-    SCRIPT.forEach(function (s) {
-      if (!s.t) return;
-      html += s.c ? '<span class="' + s.c + '">' + esc(s.t) + '</span>' : esc(s.t);
-    });
-    out.innerHTML = html + '<span class="caret"></span>';
-  }
-  function esc(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function play() {
-    var i = 0, buf = '';
-    function step() {
-      if (i >= SCRIPT.length) {
-        out.innerHTML = buf + '<span class="caret"></span>';
-        return;
-      }
-      var s = SCRIPT[i];
-      if (s.d) { i++; setTimeout(step, s.d); return; }
-      var txt = s.t, ci = 0;
-      var open = s.c ? '<span class="' + s.c + '">' : '';
-      var close = s.c ? '</span>' : '';
-      function ch() {
-        ci++;
-        var partial = open + esc(txt.slice(0, ci)) + close;
-        out.innerHTML = buf + partial + '<span class="caret"></span>';
-        if (ci < txt.length) {
-          setTimeout(ch, txt.charCodeAt(ci - 1) === 10 ? 26 : 9);
-        } else {
-          buf += open + esc(txt) + close;
-          i++;
-          setTimeout(step, 14);
-        }
-      }
-      ch();
-    }
-    step();
-  }
-
-  if (reduce) {
-    renderAll();
-  } else if ('IntersectionObserver' in window) {
-    var seen = false;
-    var tio = new IntersectionObserver(function (es) {
-      es.forEach(function (e) {
-        if (e.isIntersecting && !seen) { seen = true; tio.disconnect(); setTimeout(play, 340); }
+  /* The terminal types itself once, when it first comes into view. It is a
+     transcript of something that already happened, so it replays rather than
+     animating forever -- and with reduced motion it is simply there. */
+  var body = document.getElementById('tape-body');
+  if (body && !reduce && 'IntersectionObserver' in window) {
+    var lines = [].slice.call(body.children);
+    lines.forEach(function (l) { l.style.opacity = '0'; });
+    var played = false;
+    var tio = new IntersectionObserver(function (entries) {
+      if (played || !entries[0].isIntersecting) return;
+      played = true;
+      lines.forEach(function (l, i) {
+        setTimeout(function () { l.style.transition = 'opacity .28s'; l.style.opacity = '1'; }, i * 170);
       });
-    }, { threshold: .25 });
-    tio.observe(out);
-  } else { renderAll(); }
+      tio.disconnect();
+    }, { threshold: 0.25 });
+    tio.observe(body);
+  }
+
+  /* Count the proof numbers up. Small, tabular, and skipped under reduced
+     motion -- a number that lies about itself for 900ms is still a lie. */
+  var stats = document.querySelectorAll('.stat b[data-count]');
+  if (stats.length && !reduce && 'IntersectionObserver' in window) {
+    var sio = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        var el = e.target, target = +el.dataset.count, start = performance.now();
+        if (!target) { sio.unobserve(el); return; }
+        (function step(now) {
+          var t = Math.min((now - start) / 900, 1);
+          el.textContent = Math.round(target * (1 - Math.pow(1 - t, 3)));
+          if (t < 1) requestAnimationFrame(step);
+        })(start);
+        sio.unobserve(el);
+      });
+    }, { threshold: 0.6 });
+    stats.forEach(function (s) { sio.observe(s); });
+  }
 })();
 </script>
-
 </body>
 </html>
