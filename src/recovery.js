@@ -384,7 +384,17 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
   // cleanup() runs from signal handlers, so anything it needs must be resolved
   // before the first await rather than deep inside the happy path.
   const phantomDirName = phantomDirOf(config.reportDir);
-  const result = (status, message) => ({ status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message, sessionId: s.sessionId || null });
+  // `base`/`baseSha` travel with the result so the event log can record them.
+  // Without them the plugin told Claude to run `git diff <base>..<branch>` and
+  // Claude guessed `main`, which is wrong on any feature branch. baseSha in
+  // particular is NOT derivable from ctx: ctx.git.headSha is HEAD at capture
+  // time, s.baseSha is HEAD at branch time, and `phantom recover` replays
+  // captures that can be days old -- so the two diverge and the capture-time
+  // value would be a plausible-looking wrong sha.
+  const result = (status, message) => ({
+    status, branch: s.branch, reportPath: s.reportPath, iterations, testsPassed, message,
+    sessionId: s.sessionId || null, base: s.origRef || null, baseSha: s.baseSha || null,
+  });
 
   /**
    * Close the crash event, exactly once, whatever happened.
@@ -932,7 +942,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     const final = result(status, message);
     // 10. Banner + webhook
-    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached, budget });
+    printBanner(final, { ctx, s, config, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached, budget });
     // A recovery runs long enough that you leave. Most terminals turn a BEL
     // into a tab badge, which needs no daemon and no Homebrew.
     ui.bell(durationMs);
@@ -998,7 +1008,28 @@ async function offerBranchDecision(final, { ctx, s, config, flags, opts, ask = u
 /** Did the user actually configure a ceiling? A Budget with none stays quiet. */
 const config_hasCeiling = (budget) => Boolean(budget && (budget.maxTokens || budget.maxCostUsd));
 
-function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, budget }) {
+/**
+ * What to type next, for the outcomes that are otherwise a dead end.
+ * @returns {string[]}
+ */
+function nextSteps(final, config) {
+  if (final.status === 'fixed' || final.status === 'dry-run') return [];
+  const out = [''];
+  if (final.status === 'timeout') {
+    out.push('retry   ' + colors.cyan('phantom recover --max-minutes ' + Math.max(30, (Number(config.maxMinutes) || 15) * 2)));
+    out.push(colors.dim('        it ran out of clock, not attempts'));
+  } else if (/spend ceiling/.test(String(final.message || ''))) {
+    out.push('retry   ' + colors.cyan('phantom recover') + colors.dim('  (after raising maxTokens or maxCostUsd)'));
+  } else if (final.status === 'unfixed') {
+    out.push('retry   ' + colors.cyan('phantom recover --max-iterations ' + Math.min(10, (Number(config.maxIterations) || 3) + 2)));
+    out.push('or      ' + colors.cyan('claude --resume ' + (final.sessionId || '<session>')) + colors.dim('  to take over yourself'));
+  } else {
+    out.push('retry   ' + colors.cyan('phantom recover') + colors.dim('  (replays this crash; no need to reproduce it)'));
+  }
+  return out;
+}
+
+function printBanner(final, { ctx, s, config, restoreHint, durationMs, tokens, cached, budget }) {
   const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (tokens ? ' · ' + report.formatTokens(tokens, cached) : ''))];
   lines.push(final.message);
   // Only when a ceiling was asked for. Phantom cannot see anyone's bill, so it
@@ -1015,6 +1046,13 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, b
     lines.push('');
     lines.push('report  ' + colors.cyan(path.relative(s.root, final.reportPath)));
   }
+  // A `fixed` run hands you four commands; every other outcome handed you none.
+  // The unfixed run is the one you hit most, and it ended with three attempts,
+  // tens of thousands of tokens, and nothing to type -- while `phantom recover`
+  // is a documented feature that was invisible at exactly the moment you want
+  // it. The knob offered is chosen by WHY it stopped: raising the iteration cap
+  // is the wrong advice for a run that ran out of clock.
+  for (const line of nextSteps(final, config || {})) lines.push(line);
   if (final.sessionId) lines.push('session ' + colors.dim(final.sessionId + '  (claude --resume ' + final.sessionId + ')'));
   if (restoreHint) lines.push(colors.yellow('your stashed changes — the command is printed below the box'));
   const color = final.status === 'fixed' ? colors.green : final.status === 'dry-run' ? colors.cyan : colors.yellow;
@@ -1026,4 +1064,4 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, b
   if (restoreHint) log.warn('your stashed changes: ' + restoreHint);
 }
 
-module.exports = { runRecovery, pruneDir, uniqueStamp, captureCrash, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };
+module.exports = { runRecovery, pruneDir, uniqueStamp, captureCrash, nextSteps, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };

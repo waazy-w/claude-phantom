@@ -22,6 +22,18 @@
           }
         ]
       }
+    ],
+    "FileChanged": [
+      {
+        "matcher": ".phantom/events.jsonl",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/phantom-events.js\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

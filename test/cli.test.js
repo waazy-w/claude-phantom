@@ -10,6 +10,21 @@ const { parseArgs, helpText, main, UsageError, flagsToOverrides } = require('../
 const ui = require('../src/ui');
 
 const node = process.execPath;
+/**
+ * An environment that is explicitly NOT a nested Claude Code tool call.
+ *
+ * The suite is usually run FROM Claude Code, which exports CLAUDECODE=1, and a
+ * test runner's stdin is never a TTY -- so phantom correctly reads the test
+ * process as nested and captures instead of recovering. Tests that exercise the
+ * recovery path have to say which side of that they are on, or the suite passes
+ * or fails depending on the terminal it was started from.
+ */
+const notNested = (over = {}) => {
+  const env = { ...process.env, ...over };
+  delete env.CLAUDECODE;
+  return env;
+};
+
 const capture = () => {
   let text = '';
   const s = new Writable({ write(c, e, cb) { text += c; cb(); } });
@@ -31,7 +46,7 @@ test('parseArgs: -- separator, = values, all flags', () => {
   assert.strictEqual(r.command, '--weird-cmd');
   assert.deepStrictEqual(r.args, ['-x']);
   assert.deepStrictEqual(r.flags, {
-    dryRun: true, allowDirty: true, test: 'npm run check', maxIterations: null, maxMinutes: 9,
+    dryRun: true, allowDirty: true, nestedRecover: false, test: 'npm run check', maxIterations: null, maxMinutes: 9,
     model: 'm1', webhook: null, config: null, noCommit: true, noPrompt: true, notify: null,
     verifyCommand: null, verbose: false, version: false, help: false, list: false, force: false,
   });
@@ -164,7 +179,7 @@ test('main: crash prints the banner, hands off to recovery, and keeps the child 
   try {
     let seen = null;
     const code = await main(['--dry-run', '--test', 'npm run check', node, 'crash.js'], {
-      cwd: dir, stdout: capture(), stderr: capture(),
+      cwd: dir, env: notNested(), stdout: capture(), stderr: capture(),
       recovery: { runRecovery: async (ctx, config, flags) => { seen = { ctx, config, flags }; return { status: 'fixed', message: 'done', branch: 'phantom/x', reportPath: null, iterations: 1, testsPassed: true }; } },
     });
     assert.strictEqual(code, 1, 'a fixed crash still exits with the original code');
@@ -193,14 +208,14 @@ test('main: crash prints the banner, hands off to recovery, and keeps the child 
     const refusedErr = capture();
     ui.setStream(refusedErr);
     await main([node, 'crash.js'], {
-      cwd: dir, stdout: capture(), stderr: capture(),
+      cwd: dir, env: notNested(), stdout: capture(), stderr: capture(),
       recovery: { runRecovery: async () => ({ status: 'refused', message: 'nothing to go on' }) },
     });
     assert.ok(refusedErr.text().includes('refused: nothing to go on'), refusedErr.text());
     ui.setStream(phantomErr);
 
     const code2 = await main([node, 'crash.js'], {
-      cwd: dir, stdout: capture(), stderr: capture(),
+      cwd: dir, env: notNested(), stdout: capture(), stderr: capture(),
       recovery: { runRecovery: async () => { throw new Error('recovery blew up'); } },
     });
     assert.strictEqual(code2, 1);
@@ -230,7 +245,7 @@ test('main: declines a crash with nothing to go on, but --dry-run still runs', a
     let called = false;
     const recovery = { runRecovery: async () => { called = true; return { status: 'fixed', message: 'x' }; } };
 
-    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7,
+    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 7,
       'the exit code is still the command\'s');
     assert.ok(!called, 'no session is spent');
     assert.ok(phantomErr.text().includes('nothing to diagnose'), phantomErr.text());
@@ -238,7 +253,7 @@ test('main: declines a crash with nothing to go on, but --dry-run still runs', a
 
     // A diagnosis with no verification is precisely what dry run is for, so it
     // is still allowed to try.
-    assert.strictEqual(await main(['--dry-run', node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7);
+    assert.strictEqual(await main(['--dry-run', node, 'quiet.js'], { cwd: repo, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 7);
     assert.ok(called, 'dry run proceeds anyway');
 
     // And a project with a test command is not silent at all in the sense that
@@ -248,7 +263,7 @@ test('main: declines a crash with nothing to go on, but --dry-run still runs', a
     fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'q', version: '1.0.0', scripts: { test: 'node --test' } }));
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: repo });
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'add tests'], { cwd: repo });
-    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, stdout: capture(), stderr: capture(), recovery }), 7);
+    assert.strictEqual(await main([node, 'quiet.js'], { cwd: repo, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 7);
     assert.ok(called, 'a testable project still gets a recovery');
   } finally { ui.setStream(null); }
 });
@@ -261,7 +276,7 @@ test('main: refuses before the banner outside git or on a dirty tree, keeping th
     fs.writeFileSync(path.join(noGit, 'crash.js'), 'process.exit(4)');
     let called = false;
     const recovery = { runRecovery: async () => { called = true; return { status: 'fixed', message: 'x' }; } };
-    assert.strictEqual(await main([node, 'crash.js'], { cwd: noGit, stdout: capture(), stderr: capture(), recovery }), 4);
+    assert.strictEqual(await main([node, 'crash.js'], { cwd: noGit, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 4);
     assert.ok(!called, 'recovery must not run outside git');
     assert.ok(phantomErr.text().includes('not a git repository'));
     assert.ok(!phantomErr.text().includes('taking over'));
@@ -272,10 +287,10 @@ test('main: refuses before the banner outside git or on a dirty tree, keeping th
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: dirty });
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'init'], { cwd: dirty });
     fs.writeFileSync(path.join(dirty, 'wip.txt'), 'uncommitted');
-    assert.strictEqual(await main([node, 'crash.js'], { cwd: dirty, stdout: capture(), stderr: capture(), recovery }), 5);
+    assert.strictEqual(await main([node, 'crash.js'], { cwd: dirty, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 5);
     assert.ok(!called, 'recovery must not run on a dirty tree');
     assert.ok(phantomErr.text().includes('--allow-dirty'));
-    assert.strictEqual(await main(['--dry-run', node, 'crash.js'], { cwd: dirty, stdout: capture(), stderr: capture(), recovery }), 5);
+    assert.strictEqual(await main(['--dry-run', node, 'crash.js'], { cwd: dirty, env: notNested(), stdout: capture(), stderr: capture(), recovery }), 5);
     assert.ok(called, 'dry run proceeds on a dirty tree');
   } finally {
     ui.setStream(null);
@@ -361,4 +376,47 @@ test('a subcommand placed after phantom\'s flags is named, not silently misroute
   });
   assert.strictEqual(code, 0);
   assert.strictEqual(out.text(), 'real');
+});
+
+test('inside a Claude Code tool call, phantom captures instead of recovering', async () => {
+  // A recovery cannot finish there. Claude Code's Bash tool times out at 120s
+  // by default (600s maximum) and phantom's default maxMinutes is 15, so the
+  // outer tool call is killed mid-recovery every time: the user sees a
+  // truncated tool result and phantom takes its SIGTERM cleanup path. It is
+  // also double spend -- an outer session paying for an inner headless one,
+  // both against the same limit, while the outer sits blocked.
+  //
+  // This test also documents why every other test in this file passes
+  // `notNested()`: the suite is usually run FROM Claude Code, so without it the
+  // whole file exercises this branch by accident.
+  const repo = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'phantom-nested-'));
+  fs.writeFileSync(path.join(repo, 'crash.js'), 'throw new TypeError("boom")');
+  execFileSync('git', ['init', '-q'], { cwd: repo });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: repo });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'init'], { cwd: repo });
+
+  const err = capture();
+  ui.setStream(err);
+  try {
+    let called = false;
+    const recovery = { runRecovery: async () => { called = true; return { status: 'fixed', message: 'x' }; } };
+    const nested = { ...process.env, CLAUDECODE: '1' };
+
+    const code = await main([node, 'crash.js'], { cwd: repo, env: nested, stdout: capture(), stderr: capture(), recovery });
+    assert.strictEqual(code, 1, 'the exit code is still the command\'s');
+    assert.ok(!called, 'no headless session is started inside a tool call');
+    assert.match(err.text(), /captured it instead of recovering/);
+    assert.match(err.text(), /\/phantom:recover/, 'and points at the command that can finish the job');
+
+    // The capture is real, so the recovery can actually happen later.
+    const crashes = fs.readdirSync(path.join(repo, '.phantom', 'crashes'));
+    assert.strictEqual(crashes.length, 1, 'the crash was saved: ' + crashes.join(', '));
+
+    // ...and the escape hatch still works for someone who means it.
+    const code2 = await main(['--nested-recover', node, 'crash.js'], {
+      cwd: repo, env: nested, stdout: capture(), stderr: capture(), recovery,
+    });
+    assert.strictEqual(code2, 1);
+    assert.ok(called, '--nested-recover overrides the capture-only default');
+  } finally { ui.setStream(null); }
 });

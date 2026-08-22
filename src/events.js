@@ -25,7 +25,9 @@ const { commandLineOf } = require('./context');
  * @property {number|null} exit
  * @property {string|null} signal
  * @property {string} [status] recovery only: fixed | unfixed | dry-run | aborted | ...
- * @property {string|null} [branch] recovery only
+ * @property {string|null} [branch] recovery only: the phantom/fix-* branch
+ * @property {string|null} [base] recovery only: the ref the fix was cut from
+ * @property {string|null} [baseSha] recovery only: the commit the fix was cut from
  * @property {string|null} [report] recovery only, relative to the repo root
  * @property {string} [message] recovery only
  * @property {string|null} [session] recovery only: Claude Code session id (`claude --resume <id>`)
@@ -316,7 +318,8 @@ function crashEvent(ctx) {
 
 /**
  * @param {object} ctx crash context
- * @param {{ status: string, branch: string|null, reportPath: string|null, message: string }} final
+ * @param {{ status: string, branch: string|null, base?: string|null, baseSha?: string|null,
+ *           reportPath: string|null, message: string, sessionId?: string|null }} final
  * @param {string} root
  */
 function recoveryEvent(ctx, final, root) {
@@ -328,6 +331,20 @@ function recoveryEvent(ctx, final, root) {
     signal: ctx.signal || null,
     status: final.status,
     branch: final.branch || null,
+    // Where the fix branch was cut from. Without it the briefing named only the
+    // fix branch, so Claude was told to offer `git diff <base>..<branch>` with
+    // nothing to put in <base> and filled in `main` -- wrong every time the
+    // crash happened on a feature branch, and silently wrong: the diff runs and
+    // shows the feature branch's whole history as if phantom had written it.
+    //
+    // The branch half is derivable here: recovery.js builds its own `origRef`
+    // out of exactly these two ctx.git fields. The sha half is not -- recovery
+    // takes it with `git rev-parse HEAD` at branch time, and `phantom recover`
+    // replays captures that can be days old, so ctx.git.headSha is the sha at
+    // *capture* time and may be nowhere near the branch point. Prefer what
+    // recovery.js passes; never invent a sha from a stale snapshot.
+    base: final.base || (ctx.git && !ctx.git.detached ? ctx.git.branch : null) || null,
+    baseSha: final.baseSha || null,
     report: final.reportPath ? path.relative(root, final.reportPath).replace(/\\/g, '/') : null,
     message: final.message || '',
     session: final.sessionId || null,
@@ -351,6 +368,22 @@ function timeAgo(iso, now = Date.now()) {
 }
 
 /**
+ * `<base ref> (<short sha>)`, either half alone, or '' when the event has
+ * neither. Events written before phantom recorded a base carry neither field,
+ * and `base undefined` in a briefing is worse than no base line at all.
+ *
+ * The sha is shortened to 10 like the report table and the undo hint, so the
+ * same commit reads the same wherever the user meets it.
+ * @param {PhantomEvent} ev
+ */
+function baseLabel(ev) {
+  const ref = ev.base ? ev.base : '';
+  const sha = ev.baseSha ? String(ev.baseSha).slice(0, 10) : '';
+  if (ref && sha) return ref + ' (' + sha + ')';
+  return ref || sha;
+}
+
+/**
  * One-line, plain-text summary shared by the hook and the status line.
  * @param {PhantomEvent} ev
  * @param {number} [now]
@@ -369,7 +402,13 @@ function describeEvent(ev, now = Date.now()) {
   }[ev.status] || ('recovery of `' + ev.command + '` ended: ' + ev.status);
   const parts = [head + ' ' + when];
   if (ev.branch) parts.push('branch ' + ev.branch);
+  const base = baseLabel(ev);
+  if (base) parts.push('base ' + base);
   if (ev.report) parts.push('report ' + ev.report);
+  // Stored since the session id landed in the event, rendered by nobody: the
+  // banner printed `claude --resume <id>` and the briefing did not, so from a
+  // Claude Code prompt the transcript of the recovery was unreachable.
+  if (ev.session) parts.push('session ' + ev.session);
   return parts.join(' · ');
 }
 

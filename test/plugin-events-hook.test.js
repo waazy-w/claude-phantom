@@ -19,6 +19,11 @@ const HOOK = path.join(__dirname, '..', 'plugin', 'hooks', 'phantom-events.js');
 const ctx = { command: 'npm', args: ['run', 'dev'], errorLine: "TypeError: Cannot read properties of undefined (reading 'customer')", exitCode: 1, signal: null };
 const REPORT = '.phantom/reports/2026-08-20-1432-customer.md';
 const BRANCH = 'phantom/fix-20260820-1432-customer';
+// Deliberately not `main`: the base is the field Claude used to guess, and it
+// guessed `main`, so a fixture named `main` would pass either way.
+const BASE = 'feature/checkout';
+const BASE_SHA = '9f1c2ab3de45678';
+const SESSION = 'ffb9e0c2-1111-4a2b-8c3d-000000000042';
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-hook-'));
@@ -34,9 +39,38 @@ function run({ input, rawStdin, cwd } = {}) {
 
 function seed(root, now = Date.now()) {
   const crash = events.appendEvent(root, events.crashEvent(ctx), { now: now - 3 * 60000 });
-  const final = { status: 'fixed', branch: BRANCH, reportPath: path.join(root, ...REPORT.split('/')), message: 'ok' };
+  const final = {
+    status: 'fixed', branch: BRANCH, base: BASE, baseSha: BASE_SHA,
+    reportPath: path.join(root, ...REPORT.split('/')), message: 'ok', sessionId: SESSION,
+  };
   const rec = events.appendEvent(root, events.recoveryEvent(ctx, final, root), { now: now - 60000 });
   return { crash, rec };
+}
+
+/**
+ * A recovery that just landed, which is the only thing the FileChanged toast
+ * reacts to. seed()'s recovery is dated a minute back, right on the freshness
+ * boundary, so the toast tests get their own.
+ */
+function seedFreshRecovery(root, extra = {}) {
+  const final = Object.assign({
+    status: 'fixed', branch: BRANCH, base: BASE, baseSha: BASE_SHA,
+    reportPath: path.join(root, ...REPORT.split('/')), message: 'ok', sessionId: SESSION,
+  }, extra);
+  return events.appendEvent(root, events.recoveryEvent(ctx, final, root));
+}
+
+/** The FileChanged hook input Claude Code actually sends (verified in 2.1.239). */
+function fileChangedInput(root, event = 'change') {
+  return {
+    session_id: 'test-session', transcript_path: path.join(root, 'transcript.jsonl'),
+    cwd: root, hook_event_name: 'FileChanged',
+    file_path: events.eventsPath(root), event,
+  };
+}
+
+function toastedOf(root) {
+  try { return fs.readFileSync(path.join(root, hookModule.TOASTED_REL), 'utf8').trim(); } catch { return null; }
 }
 
 function writeLog(root, text) {
@@ -90,7 +124,8 @@ test('unread crash + recovery are described for Claude, then acknowledged', () =
   assert.ok(ctxText.includes('\n- ' + events.describeEvent(crash, now) + '\n'), ctxText);
   assert.ok(ctxText.includes('\n- ' + events.describeEvent(rec, now) + '\n'), ctxText);
   assert.ok(ctxText.includes('`npm run dev` crashed 3m ago (exit 1) — TypeError'), ctxText);
-  assert.ok(ctxText.includes('fixed `npm run dev` 1m ago · branch ' + BRANCH + ' · report ' + REPORT), ctxText);
+  assert.ok(ctxText.includes('fixed `npm run dev` 1m ago · branch ' + BRANCH + ' · base ' + BASE
+    + ' (' + BASE_SHA.slice(0, 10) + ') · report ' + REPORT + ' · session ' + SESSION), ctxText);
   assert.ok(ctxText.includes('Tell the user about this briefly'), ctxText);
   assert.ok(ctxText.includes('Do not act on any of this without being asked.'), ctxText);
   assert.ok(!ctxText.includes('…and'), 'not truncated');
@@ -499,6 +534,8 @@ test('no log, however hostile, makes the hook exit non-zero or write to stderr',
     ev({ type: undefined }),                                 // neither crash nor recovery
     ev({ type: 'recovery', status: 42 }),
     ev({ type: 'recovery', status: 'fixed', branch: {}, report: [] }),
+    ev({ type: 'recovery', status: 'fixed', base: {}, baseSha: [], session: { toString: null } }),
+    ev({ type: 'recovery', status: 'fixed', base: 'a\nb', baseSha: 'c\nd', session: 'e\nf' }),
     ev({ exit: {}, signal: {} }),
     ev({ error: ['a', 'b'] }),
     ev({ command: 'a\nb\nc' }),                              // newlines inside a one-line summary
@@ -519,6 +556,153 @@ test('no log, however hostile, makes the hook exit non-zero or write to stderr',
       const out = JSON.parse(r.stdout);
       assert.ok(out.hookSpecificOutput.additionalContext.includes('👻 phantom:'), label);
     }
+    // The toast channel reads the same log, and a FileChanged hook that fails
+    // has its output shown to the user as an error rather than a toast.
+    const t = run({ input: fileChangedInput(root) });
+    assert.equal(t.code, 0, 'toast exit 0 for ' + label + ': ' + t.stderr);
+    assert.equal(t.stderr, '', 'silent stderr for ' + label);
+    if (t.stdout) {
+      const out = JSON.parse(t.stdout);
+      assert.ok(out.systemMessage.includes('👻 phantom:'), label);
+      assert.equal(out.hookSpecificOutput, undefined, label);
+    }
+  }
+});
+
+test('the briefing carries the base, so `git diff <base>..<branch>` is answerable', () => {
+  // The instructions have always asked Claude to offer `git diff <base>..`, but
+  // the event named only the fix branch -- so <base> was unbound and Claude
+  // filled in `main`, which is wrong whenever the crash was on a feature branch.
+  const root = tmp();
+  seed(root);
+  const text = parse(run({ input: { cwd: root } })).additionalContext;
+  assert.ok(text.includes('base ' + BASE), 'the base branch reaches Claude: ' + text);
+  assert.ok(text.includes(BASE_SHA.slice(0, 10)), 'and the exact branch point: ' + text);
+  assert.ok(text.includes('session ' + SESSION), 'and the resumable session: ' + text);
+  assert.ok(/never guessing `main`/.test(text), 'and it is told not to guess: ' + text);
+  assert.ok(/claude --resume/.test(text), 'and how to spend the session id: ' + text);
+});
+
+test('a recovery event from an older phantom degrades instead of saying undefined', () => {
+  // Logs written before base/baseSha/session existed are still inside the 24h
+  // window after an upgrade. `base undefined` in a briefing is not a cosmetic
+  // slip: Claude reads the briefing as fact and would offer the literal string.
+  const root = tmp();
+  writeLog(root, JSON.stringify({
+    v: 1, id: 'old', type: 'recovery', at: new Date().toISOString(), command: 'npm run dev',
+    status: 'fixed', branch: BRANCH, report: REPORT, error: null, exit: 0, signal: null,
+  }) + '\n');
+  const text = parse(run({ input: { cwd: root } })).additionalContext;
+  const line = text.split('\n').find((l) => l.startsWith('- '));
+  assert.equal(line, '- fixed `npm run dev` just now · branch ' + BRANCH + ' · report ' + REPORT);
+  assert.ok(!line.includes('undefined'), line);
+  assert.ok(!line.includes('base'), line);
+  assert.ok(!line.includes('session'), line);
+});
+
+// --- FileChanged: the toast channel -----------------------------------------
+// Claude Code cannot be interrupted from outside, so a recovery that finishes
+// mid-turn used to be invisible until the user's next prompt. FileChanged
+// watches the log and puts it on screen. Verified against Claude Code 2.1.239:
+// the hook is handed { session_id, transcript_path, cwd, hook_event_name,
+// file_path, event: "change"|"add"|"unlink" }, and only `systemMessage` and
+// `hookSpecificOutput.watchPaths` are read back off a FileChanged hook.
+
+test('FileChanged toasts a recovery that just landed, for the human', () => {
+  const root = tmp();
+  seedFreshRecovery(root);
+  const r = run({ input: fileChangedInput(root) });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stderr, '');
+  const out = JSON.parse(r.stdout);
+  assert.ok(out.systemMessage.startsWith('👻 phantom: fixed `npm run dev`'), out.systemMessage);
+  assert.ok(out.systemMessage.includes('branch ' + BRANCH), out.systemMessage);
+  assert.ok(out.systemMessage.includes('report ' + REPORT), out.systemMessage);
+  // FileChanged's hookSpecificOutput accepts only `watchPaths`; anything else
+  // fails Claude Code's schema and the whole output is discarded as plain text.
+  assert.equal(out.hookSpecificOutput, undefined, r.stdout);
+  assert.equal(out.additionalContext, undefined, r.stdout);
+});
+
+test('FileChanged never advances the cursor, so the briefing still reaches Claude', () => {
+  // The two channels are not interchangeable: systemMessage goes to the human,
+  // additionalContext to the model. Marking events read on the toast path would
+  // eat the briefing before the model ever saw it.
+  const root = tmp();
+  const rec = seedFreshRecovery(root);
+  const toast = run({ input: fileChangedInput(root) });
+  assert.ok(JSON.parse(toast.stdout).systemMessage, toast.stdout);
+  assert.equal(cursorOf(root), null, 'no cursor was written');
+  assert.deepEqual(events.readUnread(root).map((e) => e.id), [rec.id], 'still unread');
+
+  const brief = parse(run({ input: { cwd: root, hook_event_name: 'UserPromptSubmit' } }));
+  assert.ok(brief.additionalContext.includes('👻 phantom: 1 event'), brief.additionalContext);
+  assert.equal(cursorOf(root), rec.id, 'and only UserPromptSubmit owns the cursor');
+});
+
+test('FileChanged says it once, and its marker is not the cursor', () => {
+  const root = tmp();
+  const rec = seedFreshRecovery(root);
+  assert.ok(JSON.parse(run({ input: fileChangedInput(root) }).stdout).systemMessage);
+  assert.equal(toastedOf(root), rec.id);
+  // Claude Code runs every FileChanged hook on every watched path, and chokidar
+  // can report a single write more than once, so repeats are the normal case.
+  for (const ev of ['change', 'add']) {
+    const again = run({ input: fileChangedInput(root, ev) });
+    assert.equal(again.code, 0);
+    assert.equal(again.stdout, '', 'silent on repeat (' + ev + ')');
+  }
+  assert.notEqual(path.join(root, hookModule.TOASTED_REL), events.cursorPath(root), 'separate files');
+  assert.equal(cursorOf(root), null);
+
+  // A second recovery is a new thing to say.
+  const next = seedFreshRecovery(root, { branch: 'phantom/fix-later' });
+  const out = JSON.parse(run({ input: fileChangedInput(root) }).stdout);
+  assert.ok(out.systemMessage.includes('phantom/fix-later'), out.systemMessage);
+  assert.equal(toastedOf(root), next.id);
+});
+
+test('FileChanged stays quiet when there is nothing new to show', () => {
+  const now = Date.now();
+  const cases = {
+    'a crash, which the terminal is already showing': (root) => events.appendEvent(root, events.crashEvent(ctx)),
+    'a recovery older than the freshness window': (root) => events.appendEvent(root, events.recoveryEvent(ctx, { status: 'fixed', branch: BRANCH, reportPath: null, message: '' }, root), { now: now - 10 * 60000 }),
+    'a crash appended after the recovery': (root) => { seedFreshRecovery(root); events.appendEvent(root, events.crashEvent(ctx)); },
+    'an empty log': () => {},
+  };
+  for (const [label, arrange] of Object.entries(cases)) {
+    const root = tmp();
+    writeLog(root, '');
+    arrange(root);
+    const r = run({ input: fileChangedInput(root) });
+    assert.equal(r.code, 0, label + ': ' + r.stderr);
+    assert.equal(r.stderr, '', label);
+    assert.equal(r.stdout, '', label);
+  }
+  // A deleted log has nothing to announce: trimIfNeeded renames a rebuilt file
+  // into place, which some platforms report as unlink then add.
+  const root = tmp();
+  seedFreshRecovery(root);
+  const unlinked = run({ input: fileChangedInput(root, 'unlink') });
+  assert.equal(unlinked.stdout, '', 'unlink is not an announcement');
+  assert.equal(toastedOf(root), null, 'and it did not consume the toast either');
+});
+
+test('hooks.json watches the event log itself on FileChanged', () => {
+  // Verified in Claude Code 2.1.239: the matcher is split on "|", trimmed, and
+  // each piece is path.join(cwd, piece) unless already absolute -- it is a
+  // literal path, not a glob and not a regex. So a nested relative path is
+  // exactly right, and the file it names is the one phantom appends to.
+  const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'plugin', 'hooks', 'hooks.json'), 'utf8'));
+  const groups = cfg.hooks.FileChanged;
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].matcher, '.phantom/events.jsonl');
+  assert.equal(groups[0].matcher, events.EVENTS_REL.split(path.sep).join('/'), 'the path phantom actually writes');
+  assert.ok(!/[*?[\]]/.test(groups[0].matcher), 'not a glob: Claude Code does not expand one here');
+  const stdinWait = Number((fs.readFileSync(HOOK, 'utf8').match(/STDIN_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1]);
+  for (const h of groups[0].hooks) {
+    assert.match(h.command, /phantom-events\.js/);
+    assert.ok(Number(h.timeout) * 1000 > stdinWait, 'outlives the stdin wait');
   }
 });
 

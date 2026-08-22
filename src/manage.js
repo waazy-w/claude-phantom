@@ -590,14 +590,19 @@ function limited(items, limit) {
  * minute, raw byte counts instead of "4.1 KB", the repo-relative path of each
  * file, and a leading kind column so a grep hit says what it is.
  *
+ * The per-section cap is part of the pretty view, not of the data: "… 40 more"
+ * is still a row the reader cannot get back, and a file or a pipe has no screen
+ * to run off the bottom of. So an unspecified `limit` means 10 for a terminal
+ * and everything for anything else; an explicit `--limit` is obeyed either way.
+ *
  * @param {object} state
  * @param {{ limit?: number|null, now?: number, stream?: NodeJS.WritableStream, pretty?: boolean }} [opts]
  * @returns {string}
  */
 function renderState(state, opts = {}) {
   const now = opts.now === undefined ? Date.now() : opts.now;
-  const limit = opts.limit === undefined ? 10 : opts.limit;
   const pretty = isPretty(opts);
+  const limit = opts.limit === undefined ? (pretty ? 10 : null) : opts.limit;
   const c = pretty ? colors : PLAIN;
   const out = [];
   const where = state.currentBranch ? ' (on ' + state.currentBranch + ')' : ' (detached HEAD)';
@@ -791,13 +796,15 @@ function lsHelp() {
     '',
     '  --all         show every entry instead of the newest 10 per section',
     '  --limit <n>   show n entries per section',
-    '  --json        print the whole state as one line of JSON on stdout, and nothing',
-    '                on stderr. Always complete: --all and --limit do not apply.',
+    '  --json        print the whole state as one line of JSON. Always complete:',
+    '                --all and --limit do not apply.',
     '',
-    'Written to a terminal the columns are aligned and long values are cut to fit.',
-    'Piped or redirected, rows become full, untruncated, tab-separated values --',
-    'kind, name or path, ISO timestamp, age, status, and text -- so that grep, cut',
-    'and awk see everything the terminal had to shorten.',
+    'Everything goes to stdout, so `phantom ls | grep` and `phantom ls > file` work.',
+    'Written to a terminal the columns are aligned, only the newest 10 per section',
+    'are shown, and long values are cut to fit. Piped or redirected, EVERY entry is',
+    'listed and rows become full, untruncated, tab-separated values -- kind, name or',
+    'path, ISO timestamp, age, status, and text -- so that grep, cut and awk see',
+    'everything the terminal had to shorten.',
     '',
     'To wrap the real `ls` command instead, use: phantom -- ls',
   ].join('\n');
@@ -820,6 +827,10 @@ function cleanHelp() {
     '  --branches          branches only          --files   crash captures and reports only',
     '  --dry-run           print the plan and stop',
     '  --yes               skip the confirmation prompt',
+    '',
+    'The plan is printed to stderr. On a terminal its columns are aligned; piped or',
+    'redirected (`phantom clean --dry-run 2> plan.txt`) the same rows come out full',
+    'and tab-separated, so the record of what a --yes run would destroy is complete.',
     '',
     'Crash captures and post-mortems are already pruned to the newest `keepReports`',
     '(default 50) on every phantom run; this is the manual, branch-aware complement.',
@@ -855,7 +866,17 @@ function repoRoot(cwd) {
  * @returns {Promise<number>} exit code
  */
 async function runList(argv = [], io = {}) {
-  const out = io.out || process.stderr;
+  // stdout, unlike every other phantom command.
+  //
+  // "phantom output goes to stderr" exists so that stdout stays the wrapped
+  // command's: `phantom npm test | jq` must see npm's bytes and nothing else.
+  // `ls` wraps nothing -- its output IS the product -- and on stderr the piped
+  // view below is unreachable: `phantom ls | grep phantom/fix-` and `phantom ls
+  // > history.txt` both got an EMPTY stdout while the listing went to the
+  // terminal, which is worse than the truncation this whole change is about.
+  // Same reasoning as --json and as bin/phantom-status.js. `clean` deliberately
+  // stays on stderr: it prompts, and its results come back through log.*.
+  const out = io.out || process.stdout;
   const cwd = io.cwd || process.cwd();
   let flags;
   try {
@@ -885,7 +906,10 @@ async function runList(argv = [], io = {}) {
     return 0;
   }
   // --limit and --all are human affordances; JSON above is deliberately whole.
-  const limit = flags.all ? null : (flags.limit === undefined ? 10 : flags.limit);
+  // `undefined` is passed through rather than resolved to 10 here, because what
+  // an unspecified limit means depends on the destination -- renderState knows
+  // that and this does not.
+  const limit = flags.all ? null : flags.limit;
   out.write(renderState(state, { limit, now: io.now, stream: out }));
   return 0;
 }

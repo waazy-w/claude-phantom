@@ -178,6 +178,33 @@ test('recoveryEvent stores the report path relative to the root', () => {
   assert.equal(events.recoveryEvent(ctx, Object.assign({ sessionId: 'abc' }, final), root).session, 'abc');
 });
 
+test('recoveryEvent records the base the fix was cut from', () => {
+  // Without it the briefing named only the fix branch, so `git diff <base>..`
+  // had nothing to fill <base> with and Claude guessed `main` -- wrong on every
+  // crash that happened on a feature branch.
+  const root = tmp();
+  const final = { status: 'fixed', branch: 'phantom/fix-x', reportPath: null, message: 'ok' };
+  const onFeature = Object.assign({}, ctx, { git: { branch: 'feature/checkout', detached: false, headSha: 'stale000' } });
+
+  const passed = events.recoveryEvent(onFeature, Object.assign({ base: 'feature/checkout', baseSha: 'abc123def4567' }, final), root);
+  assert.equal(passed.base, 'feature/checkout');
+  assert.equal(passed.baseSha, 'abc123def4567', 'the full sha is stored; shortening is a rendering choice');
+
+  // recovery.js derives its own origRef from exactly these ctx.git fields, so
+  // the branch half is recoverable here even when nothing is passed.
+  const derived = events.recoveryEvent(onFeature, final, root);
+  assert.equal(derived.base, 'feature/checkout');
+  // ...but the sha is not: `phantom recover` replays captures that can be days
+  // old, so ctx.git.headSha is HEAD at capture time, not the branch point.
+  assert.equal(derived.baseSha, null, 'never invented from a stale snapshot');
+  assert.notEqual(derived.baseSha, 'stale000');
+
+  // Detached HEAD has no branch name to report, and no git info at all is fine.
+  const detached = Object.assign({}, ctx, { git: { branch: null, detached: true, headSha: 'deadbeef' } });
+  assert.equal(events.recoveryEvent(detached, final, root).base, null);
+  assert.equal(events.recoveryEvent(ctx, final, root).base, null);
+});
+
 test('describeEvent and timeAgo produce the shared one-liners', () => {
   const now = Date.parse('2026-08-20T12:00:00Z');
   const at = new Date(now - 3 * 60000).toISOString();
@@ -197,6 +224,34 @@ test('describeEvent and timeAgo produce the shared one-liners', () => {
   assert.equal(events.describeEvent(unfixed, now), 'could not fix `npm run dev` 3m ago');
   const other = Object.assign({}, unfixed, { status: 'timeout' });
   assert.equal(events.describeEvent(other, now), 'recovery of `npm run dev` ended: timeout 3m ago');
+});
+
+test('describeEvent renders the base and the session id', () => {
+  const now = Date.parse('2026-08-20T12:00:00Z');
+  const at = new Date(now - 3 * 60000).toISOString();
+  const fixed = {
+    v: 1, id: 'y', type: 'recovery', at, command: 'npm run dev', status: 'fixed',
+    branch: 'phantom/fix-x', base: 'feature/checkout', baseSha: 'abc123def4567890',
+    report: '.phantom/reports/r.md', session: 's-1234',
+  };
+  assert.equal(events.describeEvent(fixed, now),
+    'fixed `npm run dev` 3m ago · branch phantom/fix-x · base feature/checkout (abc123def4) · report .phantom/reports/r.md · session s-1234');
+
+  // Either half of the base alone still reads, and the sha alone is enough to
+  // diff against -- a dry run has no branch but still has a base commit.
+  assert.equal(events.describeEvent(Object.assign({}, fixed, { baseSha: null }), now),
+    'fixed `npm run dev` 3m ago · branch phantom/fix-x · base feature/checkout · report .phantom/reports/r.md · session s-1234');
+  assert.equal(events.describeEvent(Object.assign({}, fixed, { base: null }), now),
+    'fixed `npm run dev` 3m ago · branch phantom/fix-x · base abc123def4 · report .phantom/reports/r.md · session s-1234');
+
+  // An event from a phantom that predates any of this must degrade to the old
+  // line, never to `base undefined` / `session undefined` in a briefing Claude
+  // reads as fact.
+  const old = { v: 1, id: 'y', type: 'recovery', at, command: 'npm run dev', status: 'fixed', branch: 'phantom/fix-x', report: '.phantom/reports/r.md' };
+  const line = events.describeEvent(old, now);
+  assert.equal(line, 'fixed `npm run dev` 3m ago · branch phantom/fix-x · report .phantom/reports/r.md');
+  assert.ok(!line.includes('undefined'), line);
+  assert.ok(!line.includes('null'), line);
 });
 
 test('a torn last line does not swallow the next event', () => {

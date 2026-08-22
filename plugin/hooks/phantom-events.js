@@ -2,18 +2,29 @@
 'use strict';
 
 /**
- * Claude Code hook (UserPromptSubmit / SessionStart) that surfaces unread
- * phantom crash/recovery events to Claude as `additionalContext`.
+ * Claude Code hook that surfaces phantom crash/recovery events, on two
+ * deliberately separate channels:
+ *
+ *   UserPromptSubmit / SessionStart -> `additionalContext`, for the MODEL.
+ *     Prints the unread briefing and advances `.phantom/events.cursor`, so
+ *     each event reaches Claude exactly once.
+ *
+ *   FileChanged -> `systemMessage`, for the HUMAN.
+ *     Claude Code cannot be interrupted from outside, so a recovery that
+ *     finishes mid-turn used to stay invisible until the user's next prompt.
+ *     Watching the log lets phantom put a toast on screen the moment it lands.
+ *     This channel MUST NOT touch the cursor: marking events read here would
+ *     eat the briefing before the model ever saw it. It keeps its own marker,
+ *     `.phantom/events.toasted`, purely to avoid toasting twice.
  *
  * Self-contained on purpose: a plugin can be installed without `src/` next
  * to it, so the reader below mirrors `src/events.js`. Keep the two in sync.
  *
  * Contract: read the hook event JSON on stdin, print nothing when there is
- * nothing to say, otherwise print
- *   {"hookSpecificOutput":{"hookEventName":"...","additionalContext":"..."}}
- * and advance `.phantom/events.cursor` so each event is reported once.
- * Never exits non-zero and never writes to stderr on the normal path: a
- * failing UserPromptSubmit hook would block the user's prompt.
+ * nothing to say. Never exits non-zero and never writes to stderr on the
+ * normal path: a failing UserPromptSubmit hook would block the user's prompt,
+ * and a FileChanged hook that fails has its output shown to the user as an
+ * error instead of a toast.
  */
 
 const fs = require('node:fs');
@@ -21,16 +32,38 @@ const path = require('node:path');
 
 const EVENTS_REL = path.join('.phantom', 'events.jsonl');
 const CURSOR_REL = path.join('.phantom', 'events.cursor');
+/**
+ * The FileChanged channel's own marker. Emphatically NOT the cursor: it records
+ * what has been shown to the human, while the cursor records what has been
+ * given to the model. Sharing one file would mean a toast silently consumed the
+ * briefing, which is the one failure this whole split exists to prevent.
+ */
+const TOASTED_REL = path.join('.phantom', 'events.toasted');
 const STALE_MS = 24 * 60 * 60 * 1000;
+/**
+ * How recent the newest event must be for FileChanged to toast it. The point of
+ * the toast is "this just happened"; the watcher settles writes for 500ms, so a
+ * minute is generous. Without a bound, any later write to the log -- a crash in
+ * another terminal, a trim rewriting the file -- would re-toast whatever
+ * recovery happened to be last, hours after the fact.
+ */
+const TOAST_FRESH_MS = 60 * 1000;
 const MAX_SHOWN = 10;
 const STDIN_TIMEOUT_MS = 2000;
 
+// `<base>` used to be unfilled: the event carried only the fix branch, so this
+// asked Claude for a diff against a base it had never been told, and Claude
+// filled in `main` -- wrong, and quietly so, whenever the crash happened on a
+// feature branch. The event now carries the base, so say to use it.
 const INSTRUCTIONS = 'Tell the user about this briefly at the start of your reply (one or two lines, keep the 👻), '
-  + 'then continue with their request. If a fix branch exists, offer `git diff <base>..<branch>` and `git merge <branch>`; '
-  + 'if a report exists, offer to open it. Do not act on any of this without being asked.';
+  + 'then continue with their request. If a fix branch exists, offer `git diff <base>..<branch>` and `git merge <branch>`, '
+  + 'taking <base> from the event\'s own base (prefer the sha in parentheses) and never guessing `main`; '
+  + 'if a report exists, offer to open it; if a session id is shown, offer `claude --resume <id>` to read the '
+  + 'recovery transcript. Do not act on any of this without being asked.';
 
 function eventsPath(root) { return path.join(root, EVENTS_REL); }
 function cursorPath(root) { return path.join(root, CURSOR_REL); }
+function toastedPath(root) { return path.join(root, TOASTED_REL); }
 
 /** Walk up from `start` to the nearest directory that has a `.phantom/events.jsonl`. */
 function findRoot(start) {
@@ -140,6 +173,19 @@ function oneLine(value) {
   return text.replace(/\s*[\r\n]+\s*/g, ' ');
 }
 
+/**
+ * `<base ref> (<short sha>)`, either half alone, or '' when the event has
+ * neither. Events written before phantom recorded a base carry neither field,
+ * and `base undefined` in a briefing is worse than no base line at all.
+ * Same output as src/events.js baseLabel -- keep the two in sync.
+ */
+function baseLabel(ev) {
+  const ref = ev.base ? oneLine(ev.base) : '';
+  const sha = ev.baseSha ? oneLine(ev.baseSha).slice(0, 10) : '';
+  if (ref && sha) return ref + ' (' + sha + ')';
+  return ref || sha;
+}
+
 /** Same one-liner as src/events.js describeEvent. */
 function describeEvent(ev, now) {
   const when = timeAgo(ev.at, now);
@@ -156,7 +202,13 @@ function describeEvent(ev, now) {
   }[ev.status] || ('recovery of `' + cmd + '` ended: ' + oneLine(ev.status));
   const parts = [head + ' ' + when];
   if (ev.branch) parts.push('branch ' + oneLine(ev.branch));
+  const base = baseLabel(ev);
+  if (base) parts.push('base ' + base);
   if (ev.report) parts.push('report ' + oneLine(ev.report));
+  // Stored since the session id landed in the event, rendered by nobody: the
+  // banner printed `claude --resume <id>` and the briefing did not, so from a
+  // Claude Code prompt the transcript of the recovery was unreachable.
+  if (ev.session) parts.push('session ' + oneLine(ev.session));
   return parts.join(' · ');
 }
 
@@ -169,6 +221,63 @@ function buildContext(root, unread, now) {
   if (hidden > 0) lines.push('…and ' + hidden + ' more');
   lines.push(INSTRUCTIONS);
   return lines.join('\n');
+}
+
+/** The event id last shown as a toast, or null. Never the cursor. */
+function readToasted(root) {
+  try {
+    const raw = fs.readFileSync(toastedPath(root), 'utf8').trim();
+    return raw ? raw.split(/\s+/, 1)[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort: a lost marker costs a duplicate toast, which is survivable. */
+function markToasted(root, id) {
+  try {
+    fs.mkdirSync(path.dirname(toastedPath(root)), { recursive: true });
+    const tmp = toastedPath(root) + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, id + '\n');
+    fs.renameSync(tmp, toastedPath(root));
+  } catch { /* best-effort */ }
+}
+
+/**
+ * The FileChanged channel: the log just changed on disk, so put the newest
+ * recovery on screen for the human, mid-turn.
+ *
+ * Only the last event, and only a recovery: a crash toast would fire while
+ * phantom is already printing its banner in the terminal the user is watching,
+ * whereas a recovery finishes minutes later with the user's attention elsewhere.
+ * That is the case README called impossible ("the chat message is always on your
+ * next turn").
+ *
+ * Deliberately no cursor read and no markRead. The briefing is a separate
+ * channel with a separate reader, and a toast must never consume it.
+ */
+async function fileChanged(root, input, now) {
+  // The log was deleted or renamed out from under the watcher (trimIfNeeded
+  // renames a rebuilt file into place, which some platforms report as
+  // unlink+add). Nothing was added, so there is nothing to announce.
+  if (input.event === 'unlink') return;
+  const events = readEvents(root);
+  const last = events[events.length - 1];
+  if (!last || last.type !== 'recovery') return;
+  const t = Date.parse(last.at);
+  if (!Number.isFinite(t) || now - t > TOAST_FRESH_MS) return;
+  // Claude Code runs every registered FileChanged hook on every watched path,
+  // and chokidar can report one write more than once, so the same recovery
+  // reaches this function repeatedly. Say it once.
+  if (readToasted(root) === last.id) return;
+  await new Promise((resolve) => {
+    // Same rule as the briefing: record it only once the bytes are out. A
+    // dropped write plus a moved marker would lose the toast for good.
+    process.stdout.write(JSON.stringify({ systemMessage: '👻 phantom: ' + describeEvent(last, now) }) + '\n', (err) => {
+      if (!err) markToasted(root, last.id);
+      resolve();
+    });
+  });
 }
 
 function readStdin() {
@@ -207,10 +316,15 @@ async function main() {
   const root = findRoot(start);
   if (!root) return;
   const now = Date.now();
+  const hookEventName = typeof input.hook_event_name === 'string' && input.hook_event_name ? input.hook_event_name : 'UserPromptSubmit';
+  // The toast channel. Its output shape is different (a bare top-level
+  // `systemMessage`; FileChanged's hookSpecificOutput accepts only
+  // `watchPaths`, so additionalContext there would be rejected outright) and it
+  // must not advance the cursor, so it returns before any of that below.
+  if (hookEventName === 'FileChanged') return await fileChanged(root, input, now);
   const events = readEvents(root);
   const unread = unreadOf(events, readCursor(root), now);
   if (!unread.length) return;
-  const hookEventName = typeof input.hook_event_name === 'string' && input.hook_event_name ? input.hook_event_name : 'UserPromptSubmit';
   const out = { hookSpecificOutput: { hookEventName, additionalContext: buildContext(root, unread, now) } };
   // stdout is a pipe, so a payload past the pipe buffer (~64 KiB -- one minified
   // stack trace in `error` does it) finishes writing asynchronously. This used
@@ -233,4 +347,7 @@ if (require.main === module) {
     .then(() => { process.exitCode = 0; });
 }
 
-module.exports = { findRoot, readEvents, readCursor, unreadOf, describeEvent, timeAgo, buildContext, MAX_SHOWN, STALE_MS };
+module.exports = {
+  findRoot, readEvents, readCursor, unreadOf, describeEvent, timeAgo, buildContext,
+  MAX_SHOWN, STALE_MS, TOASTED_REL, TOAST_FRESH_MS,
+};

@@ -561,3 +561,317 @@ test('a real reports directory still cleans, so the symlink guard is not over-ti
   assert.equal(applied.counts.reports, 1, 'an ordinary report inside .phantom/ is still removed');
   assert.ok(!fs.existsSync(path.join(reports, '20200101-000000-real.md')));
 });
+
+/* -------------------------------------------------------------------------- */
+/* machine-readable output: piped rendering and --json                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The same capture, but claiming to be a terminal.
+ *
+ * Which view `ls` and `clean` render is decided from the destination stream, so
+ * every test below has to say which one it is testing. Left to the default the
+ * assertions would pass or fail according to whether the developer running the
+ * suite had a terminal attached.
+ */
+const tty = () => Object.assign(capture(), { isTTY: true });
+
+/** Rows of a piped listing: the tab-separated ones, in order. */
+const tsv = (text) => text.split('\n').filter((l) => l.includes('\t')).map((l) => l.split('\t'));
+
+/** The one crash capture written into `dir`, repo-relative. */
+const soleCrash = (dir) => '.phantom/crashes/' + fs.readdirSync(path.join(dir, '.phantom', 'crashes'))[0];
+
+/** The byte every colour sequence starts with; a pipe must never see one. */
+const ESC = '\u001b';
+
+test('a piped listing carries everything the terminal had to shorten', async () => {
+  // renderState cut subjects to 60 and crash descriptions to 64 columns and
+  // padded every cell, for a pipe exactly as for a terminal. `phantom ls >
+  // history.txt` therefore recorded an elided copy of the branch name and the
+  // failing command, and `awk '{print $2}'` could not split on padding made of
+  // the same spaces the values themselves contain.
+  const dir = tmpRepo();
+  const subject = 'phantom: fix ' + 'A'.repeat(120) + ' TAIL';
+  const command = 'npm run ' + 'z'.repeat(100);
+  const errorLine = 'TypeError: ' + 'B'.repeat(80);
+  writeCrash(dir, 'wordy', 1, { commandLine: command, errorLine });
+  writeReport(dir, 'wordy', 1, 'T'.repeat(100));
+  const b = fixBranch(dir, 'phantom/fix-wordy-aaa11', subject, 1);
+  g(dir, 'merge', '-q', '--no-edit', b);
+
+  await quiet(async () => {
+    const pretty = tty();
+    assert.equal(await manage.runList([], { cwd: dir, out: pretty }), 0);
+    const piped = capture();
+    assert.equal(await manage.runList([], { cwd: dir, out: piped }), 0);
+
+    // The terminal view is the lossy one, deliberately.
+    assert.match(pretty.text(), /…/, 'the aligned view still elides to fit a screen');
+    assert.equal(pretty.text().includes('TAIL'), false, 'the tail of the subject is gone from it');
+
+    // The piped one loses nothing.
+    for (const whole of [subject, command, errorLine, 'T'.repeat(100)]) {
+      assert.ok(piped.text().includes(whole), 'piped output kept: ' + whole.slice(0, 24));
+    }
+    const rows = tsv(piped.text());
+    assert.deepEqual(rows.map((r) => r[0]), ['branch', 'crash', 'report'], 'each row says what it is');
+    assert.deepEqual(rows.map((r) => r.length), [6, 6, 6], 'one shape: kind, name, ISO, age, status/bytes, text');
+    for (const row of rows) {
+      for (const cell of row) {
+        assert.equal(cell, cell.trim(), 'no padding: ' + JSON.stringify(cell));
+        assert.equal(cell.includes('…'), false, 'nothing elided: ' + JSON.stringify(cell));
+      }
+      assert.match(row[2], /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/, 'a full ISO timestamp, not a local minute');
+    }
+    // The columns the terminal formats for reading are raw values here.
+    assert.equal(rows[0][1], b);
+    assert.equal(rows[0][4], 'merged');
+    assert.equal(rows[1][1], soleCrash(dir));
+    assert.match(rows[1][4], /^\d+$/, 'raw bytes, not "4.1 KB"');
+    assert.equal(Number(rows[1][4]), fs.statSync(path.join(dir, soleCrash(dir))).size);
+  });
+});
+
+test('the piped listing is complete: the per-section cap belongs to the pretty view', async () => {
+  // "… 2 more" is a row the reader cannot get back, and a file or a pipe has no
+  // screen to run off the bottom of. An explicit --limit is still obeyed.
+  const dir = tmpRepo();
+  for (let i = 1; i <= 12; i++) writeCrash(dir, 'c' + i, i);
+
+  await quiet(async () => {
+    const pretty = tty();
+    await manage.runList([], { cwd: dir, out: pretty });
+    assert.match(pretty.text(), /… 2 more/);
+    assert.equal(tsv(pretty.text()).length, 0, 'the terminal view is not tab-separated at all');
+
+    const piped = capture();
+    await manage.runList([], { cwd: dir, out: piped });
+    assert.equal(tsv(piped.text()).length, 12, 'every capture, not the newest 10');
+    assert.equal(/ more$/m.test(piped.text()), false, 'and nothing left to say "more" about');
+
+    const limited = capture();
+    await manage.runList(['--limit', '3'], { cwd: dir, out: limited });
+    assert.equal(tsv(limited.text()).length, 3, '--limit is a request, and is obeyed on a pipe too');
+    assert.match(limited.text(), /… 9 more/);
+  });
+});
+
+test('a pipe never receives a colour escape, even under FORCE_COLOR', async () => {
+  // ui.colors decides from *ui's* stream, which is not necessarily the stream
+  // `ls` was told to write to, and FORCE_COLOR overrides that unconditionally.
+  // So the piped view cannot ask for colour and hope the global answer is "no":
+  // an escape sequence in a redirected file breaks the grep the file exists for.
+  const dir = tmpRepo();
+  const b = fixBranch(dir, 'phantom/fix-open-bbb22', 'phantom: WIP', 1);
+  const saved = { NO_COLOR: process.env.NO_COLOR, FORCE_COLOR: process.env.FORCE_COLOR };
+  delete process.env.NO_COLOR;
+  process.env.FORCE_COLOR = '1';
+  ui.setStream(capture());
+  try {
+    const state = manage.listPhantomState(dir);
+    const plan = manage.planClean(state, { unmerged: true });
+    assert.equal(plan.unmergedSelected, 1, 'so renderPlan reaches its coloured warning');
+    for (const text of [manage.renderState(state, { pretty: false }), manage.renderPlan(plan, { pretty: false })]) {
+      assert.equal(text.includes(ESC), false, 'no escapes in the piped view: ' + JSON.stringify(text.slice(0, 80)));
+    }
+    // The control: with colour on, the terminal view really is painted -- so the
+    // assertions above are testing PLAIN and not testing an environment variable.
+    assert.ok(manage.renderState(state, { pretty: true }).includes(ESC), 'the terminal view is coloured');
+    assert.ok(manage.renderPlan(plan, { pretty: true }).includes(ESC));
+    assert.equal(b, 'phantom/fix-open-bbb22');
+  } finally {
+    ui.setStream(null);
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
+test('a tab or a newline in a value cannot invent a column or a row', async () => {
+  // Tab and newline ARE the structure in the piped view, and both values here
+  // come from outside phantom: git takes a commit subject with a literal tab in
+  // it, and errorLine is a slice of some other program's output.
+  const dir = tmpRepo();
+  // The branch first: fixBranch commits everything in the tree, so a capture
+  // written before it would be committed onto the fix branch and then vanish
+  // from the working tree on the way back to main.
+  fixBranch(dir, 'phantom/fix-tabbed-aaa11', 'phantom: fix\tsplit\tsubject', 1);
+  writeCrash(dir, 'nasty', 1, { commandLine: 'npm\ttest', errorLine: 'Error: one\ntwo\rthree' });
+
+  await quiet(async () => {
+    const piped = capture();
+    await manage.runList([], { cwd: dir, out: piped });
+    const rows = tsv(piped.text());
+    assert.deepEqual(rows.map((r) => r.length), [6, 6], 'still two rows of six fields');
+    assert.equal(rows[0][5], 'phantom: fix split subject', 'tabs collapse to spaces; the text survives');
+    assert.equal(rows[1][5], 'npm test — Error: one two three');
+    assert.equal(rows[1][1], soleCrash(dir));
+  });
+});
+
+test('clean --dry-run degrades the same way, so a saved plan is complete', async () => {
+  // This is the record a user keeps of what a --yes run was about to destroy.
+  const dir = tmpRepo();
+  const subject = 'phantom: fix ' + 'C'.repeat(120) + ' TAIL';
+  writeCrash(dir, 'old', 90);
+  const merged = fixBranch(dir, 'phantom/fix-merged-aaa11', subject, 90);
+  g(dir, 'merge', '-q', '--no-edit', merged);
+  const open = fixBranch(dir, 'phantom/fix-open-bbb22', 'phantom: WIP', 90);
+
+  await quiet(async () => {
+    const pretty = tty();
+    assert.equal(await manage.runClean(['--dry-run', '--all', '--unmerged'], { cwd: dir, out: pretty, ask: async () => 'n' }), 0);
+    const text = pretty.text();
+    assert.match(text, /would delete:/);
+    // Aligned: every row puts its age column in the same place, whatever the
+    // width of the name beside it. Measured rather than spelled out as a fixed
+    // run of spaces, because the widths depend on a temp path.
+    const ages = text.split('\n').filter((l) => l.includes('90d ago')).map((l) => l.indexOf('90d ago'));
+    assert.equal(ages.length, 3);
+    assert.equal(new Set(ages).size, 1, 'one column, not three: ' + JSON.stringify(text));
+    assert.match(text, /^ {2}branch {2}phantom\/fix-open-bbb22 +90d ago {2}UNMERGED$/m);
+    assert.match(text, /^ {2}crash {3}\.phantom\/crashes\/\S+\.json +90d ago {2}85 B$/m, 'and bytes read for a human');
+    assert.match(text, /2 branch\(es\), 1 crash capture\(s\)/);
+    assert.match(text, /reflog/, 'the unmerged warning survives in both views');
+
+    const piped = capture();
+    assert.equal(await manage.runClean(['--dry-run', '--all', '--unmerged'], { cwd: dir, out: piped, ask: async () => 'n' }), 0);
+    const rows = tsv(piped.text());
+    assert.deepEqual(rows.map((r) => r.length), [5, 5, 5], 'kind, name, ISO, age, status/bytes');
+    assert.deepEqual(rows.map((r) => r[0]).sort(), ['branch', 'branch', 'crash']);
+    assert.deepEqual(rows.map((r) => r[1]).sort(), [open, merged, soleCrash(dir)].sort());
+    for (const row of rows) {
+      for (const cell of row) assert.equal(cell, cell.trim(), 'no padding: ' + JSON.stringify(cell));
+      assert.match(row[2], /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    }
+    assert.equal(rows.find((r) => r[1] === open)[4], 'UNMERGED', 'the warning is greppable, not only coloured');
+    assert.ok(Number(rows.find((r) => r[0] === 'crash')[4]) > 0, 'raw bytes');
+    assert.match(piped.text(), /reflog/);
+    // The whole plan is listed, however long: there is no "… n more" here.
+    assert.equal(/ more$/m.test(piped.text()), false);
+    assert.equal(manage.listPhantomState(dir).branches.length, 2, 'and a dry run deleted nothing');
+  });
+});
+
+test('ls --json prints one line of complete, parseable state on stdout', async () => {
+  const dir = tmpRepo();
+  writeCrash(dir, 'boom', 2, { commandLine: 'npm run dev', errorLine: 'TypeError: boom', exitCode: 1 });
+  writeReport(dir, 'boom', 2, 'npm run dev (exit 1)');
+  const merged = fixBranch(dir, 'phantom/fix-merged-aaa11', 'phantom: fix TypeError: boom', 3);
+  g(dir, 'merge', '-q', '--no-edit', merged);
+  const open = fixBranch(dir, 'phantom/fix-open-bbb22', 'phantom: WIP', 1);
+  const now = Date.now();
+
+  await quiet(async () => {
+    const human = capture();
+    const json = capture();
+    assert.equal(await manage.runList(['--json'], { cwd: dir, out: human, jsonOut: json, now }), 0);
+
+    // The split is the contract: `phantom ls --json | jq` must not have to
+    // filter phantom's own log lines out of the JSON it asked for.
+    assert.equal(human.text(), '', 'nothing on the human stream');
+    assert.equal(json.text().trimEnd().includes('\n'), false, 'exactly one line, for a line-delimited consumer');
+    assert.equal(json.text().endsWith('\n'), true);
+    const state = JSON.parse(json.text());
+
+    assert.deepEqual(Object.keys(state).sort(), [
+      'branches', 'crashDir', 'crashes', 'currentBranch', 'keepReports', 'phantomDir', 'reportDir', 'reports', 'root', 'totals',
+    ], 'the top-level shape is the contract; changing it silently breaks every consumer');
+    assert.deepEqual(Object.keys(state.crashes[0]).sort(), ['ageDays', 'at', 'bytes', 'detail', 'file', 'kind', 'name', 'rel', 'slug']);
+    assert.deepEqual(Object.keys(state.crashes[0].detail).sort(), ['command', 'errorLine', 'exit', 'signal']);
+    assert.deepEqual(Object.keys(state.reports[0].detail).sort(), ['title']);
+    assert.deepEqual(Object.keys(state.branches[0]).sort(), ['ageDays', 'at', 'current', 'kind', 'merged', 'name', 'sha', 'shortSha', 'subject']);
+    assert.deepEqual(Object.keys(state.totals).sort(), ['crashBytes', 'reportBytes']);
+
+    // Absolute paths for a consumer that will open the file, repo-relative ones
+    // for a consumer that will print it.
+    assert.equal(state.root, dir);
+    assert.equal(path.isAbsolute(state.crashes[0].file), true);
+    assert.equal(state.crashDir, path.join(dir, '.phantom', 'crashes'));
+    assert.equal(state.reportDir, path.join(dir, '.phantom', 'reports'));
+    assert.equal(state.phantomDir, path.join(dir, '.phantom'));
+    assert.equal(state.crashes[0].rel, '.phantom/crashes/' + state.crashes[0].name);
+    assert.equal(state.crashes[0].rel.includes('\\'), false, 'forward slashes on every platform');
+
+    // Timestamp AND age: the age is what a human-facing consumer prints, the ISO
+    // stamp is the only one that can be sorted or compared across machines.
+    assert.match(state.crashes[0].at, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    assert.equal(typeof state.crashes[0].ageDays, 'number');
+    assert.ok(state.crashes[0].ageDays > 1.9 && state.crashes[0].ageDays < 2.2);
+    assert.equal(state.crashes[0].bytes, fs.statSync(state.crashes[0].file).size);
+    assert.equal(state.totals.crashBytes, state.crashes[0].bytes);
+    assert.equal(state.keepReports, 50);
+
+    assert.equal(state.currentBranch, 'main');
+    assert.deepEqual(state.branches.map((b) => b.name), [open, merged], 'newest tip first, as in the listing');
+    assert.equal(state.branches.find((b) => b.name === merged).merged, true);
+    assert.equal(state.branches.find((b) => b.name === open).merged, false);
+    assert.equal(state.branches.every((b) => b.current === false), true);
+    assert.match(state.branches[0].sha, /^[0-9a-f]{40}$/);
+
+    // Nothing formatted, nothing truncated: the values, not the view of them.
+    assert.equal(state.crashes[0].detail.command, 'npm run dev');
+    assert.equal(state.reports[0].detail.title, 'npm run dev (exit 1)');
+
+    // And it is exactly what the library call returns: --json is a serialisation,
+    // not a second view of the same data that can drift from the first.
+    assert.deepEqual(state, JSON.parse(JSON.stringify(manage.listPhantomState(dir, { now }))));
+  });
+});
+
+test('ls --json on an untouched repo is still valid, complete JSON', async () => {
+  // An empty repo is the first thing a consumer meets, and "no history yet" has
+  // to be an empty array rather than a missing key or a non-zero exit.
+  const dir = tmpRepo();
+  await quiet(async () => {
+    const json = capture();
+    assert.equal(await manage.runList(['--json'], { cwd: dir, out: capture(), jsonOut: json }), 0);
+    const state = JSON.parse(json.text());
+    assert.deepEqual([state.crashes, state.reports, state.branches], [[], [], []]);
+    assert.deepEqual(state.totals, { crashBytes: 0, reportBytes: 0 });
+    assert.equal(state.currentBranch, 'main');
+    assert.equal(state.root, dir);
+  });
+});
+
+test('--json stays whole next to the human flags, and clean refuses it outright', async () => {
+  const dir = tmpRepo();
+  for (let i = 1; i <= 12; i++) writeCrash(dir, 'c' + i, i);
+  await quiet(async (logged) => {
+    for (const argv of [['--json'], ['--json', '--limit', '2'], ['--json', '--all'], ['--limit=2', '--json']]) {
+      const json = capture();
+      assert.equal(await manage.runList(argv, { cwd: dir, out: capture(), jsonOut: json }), 0, argv.join(' '));
+      assert.equal(JSON.parse(json.text()).crashes.length, 12, argv.join(' ') + ' is still complete');
+    }
+    // Accepting --json on `clean` and ignoring it would be worse than refusing
+    // it: a script that asked for parseable output, got a prose plan, and could
+    // not parse it would go on to delete things anyway.
+    assert.throws(() => manage.parseManageArgs('clean', ['--json']), /unknown option --json/);
+    const out = capture();
+    assert.equal(await manage.runClean(['--json', '--yes'], { cwd: dir, out }), 2);
+    assert.match(logged.text(), /unknown option --json/);
+    assert.equal(out.text(), '', 'and no plan was printed');
+  });
+});
+
+test('`phantom ls` writes its listing to stdout, so that it can be piped at all', () => {
+  // The listing went to stderr like every other phantom command, so `phantom ls
+  // | grep phantom/fix-` and `phantom ls > history.txt` both got an EMPTY
+  // stdout: the piped view was unreachable through the CLI. The stderr rule
+  // exists to keep stdout for the WRAPPED command, and `ls` wraps nothing.
+  const dir = tmpRepo();
+  const b = fixBranch(dir, 'phantom/fix-piped-aaa11', 'phantom: fix boom', 1);
+  g(dir, 'merge', '-q', '--no-edit', b);
+  const bin = path.join(__dirname, '..', 'bin', 'phantom.js');
+  const run = (...args) => {
+    // A real child, because the question is which file descriptor the bytes
+    // land on -- which an injected stream cannot answer. Its stdio is a pipe,
+    // which is also the case under test: the piped view.
+    const r = execFileSync(process.execPath, [bin, ...args], {
+      cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, NO_COLOR: '1', PHANTOM_DISABLED: '' },
+    });
+    return r;
+  };
+  assert.match(run('ls'), new RegExp('^branch\\t' + b + '\\t', 'm'), 'greppable, on stdout');
+  assert.equal(JSON.parse(run('ls', '--json')).branches[0].name, b);
+});

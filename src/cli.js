@@ -40,6 +40,7 @@ const VALUE_FLAGS = {
 const BOOL_FLAGS = {
   '--dry-run': ['dryRun', true],
   '--allow-dirty': ['allowDirty', true],
+  '--nested-recover': ['nestedRecover', true],
   '--no-commit': ['noCommit', true],
   '--commit': ['noCommit', false],
   '--no-prompt': ['noPrompt', true],
@@ -90,7 +91,7 @@ function defaultFlags() {
   // distinguishable from "explicitly turned off", or `--no-notify` cannot beat
   // a config file that turned it on.
   return {
-    dryRun: false, allowDirty: false, test: null, maxIterations: null, maxMinutes: null,
+    dryRun: false, allowDirty: false, nestedRecover: false, test: null, maxIterations: null, maxMinutes: null,
     model: null, webhook: null, config: null, noCommit: null, noPrompt: null, notify: null,
     verifyCommand: null, verbose: false, version: false, help: false, list: false, force: false,
   };
@@ -452,6 +453,26 @@ async function main(argv = process.argv.slice(2), io = {}) {
       log.warn('crash saved to ' + path.relative(cwd, saved).replace(/\\/g, '/'));
       log.warn('  ' + retryHint(refusal));
     }
+    return childExit;
+  }
+  // Nested inside a Claude Code tool call, a recovery cannot finish. Claude
+  // Code's Bash tool times out at 120s by default (600s maximum) and phantom's
+  // default maxMinutes is 15, so the outer tool call is killed mid-recovery
+  // every time -- the user sees a truncated tool result and phantom takes its
+  // SIGTERM cleanup path. It is also double spend: an outer session paying for
+  // an inner headless one, both against the same limit, while the outer sits
+  // blocked and unable to say anything.
+  //
+  // Capturing is strictly better than that, and it feeds /phantom:recover,
+  // which already exists and already handles exactly this input.
+  const nested = env.CLAUDECODE !== undefined && env.CLAUDECODE !== '' && !process.stdin.isTTY;
+  if (nested && !flags.nestedRecover && ctx.git) {
+    const rec = io.recovery && io.recovery.captureCrash ? io.recovery : require('./recovery');
+    const saved = rec.captureCrash(ctx, config);
+    log.warn(describeCommand(command, args) + ' crashed (' + summarizeExit(result) + '); phantom captured it instead of recovering');
+    if (saved) log.warn('  ' + path.relative(cwd, saved).replace(/\\/g, '/'));
+    log.warn('  recover here with /phantom:recover, or in a terminal: phantom recover');
+    log.warn(colors.dim('  (a recovery needs longer than a tool call gets; --nested-recover overrides)'));
     return childExit;
   }
   if (ctx.git) await announce.announceCrash(ctx, config, ctx.git.root);
