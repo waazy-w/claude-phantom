@@ -457,3 +457,50 @@ test('buildClaudeEnv defaults to the current environment', () => {
     if (restore === undefined) delete process.env.CLAUDECODE; else process.env.CLAUDECODE = restore;
   }
 });
+
+test('the recovery session does not inherit the parent session\'s own environment', () => {
+  // Deleting CLAUDECODE and CLAUDE_CODE_ENTRYPOINT was not enough. Running
+  // inside Claude Code exports ten of these, and two are a capability:
+  // CLAUDE_CODE_MESSAGING_SOCKET and CLAUDE_CODE_MESSAGING_TOKEN are a
+  // unix-domain socket and bearer token addressed at the user's LIVE session.
+  // A recovery agent denied WebFetch, curl, git push and Task was inheriting a
+  // channel back into the session that launched it -- a larger capability than
+  // anything on the deny list. CLAUDE_EFFORT mattered more quietly: it set the
+  // recovery's reasoning effort from whatever the outer session was using.
+  const parent = {
+    PATH: '/usr/bin', HOME: '/home/x', LANG: 'en_US.UTF-8',
+    CLAUDECODE: '1',
+    AI_AGENT: '1',
+    CLAUDE_CODE_ENTRYPOINT: 'cli',
+    CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/claude.sock',
+    CLAUDE_CODE_MESSAGING_TOKEN: 'bearer-secret',
+    CLAUDE_CODE_SESSION_ID: '9f2c1a44',
+    CLAUDE_CODE_CHILD_SESSION: '1',
+    CLAUDE_CODE_EXECPATH: '/opt/claude',
+    CLAUDE_EFFORT: 'max',
+    CLAUDE_PID: '4242',
+    // ...and the two that must survive, because they are how the session
+    // authenticates and finds its config, not how the parent talks to it.
+    CLAUDE_CODE_OAUTH_TOKEN: 'keep-me',
+    CLAUDE_CONFIG_DIR: '/keep/me/too',
+    ANTHROPIC_API_KEY: 'keep-me-as-well',
+  };
+  const env = buildClaudeEnv(parent);
+
+  for (const gone of ['CLAUDECODE', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_MESSAGING_SOCKET',
+    'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION',
+    'CLAUDE_CODE_EXECPATH', 'CLAUDE_EFFORT', 'CLAUDE_PID']) {
+    assert.equal(env[gone], undefined, gone + ' must not reach the recovery session');
+  }
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'keep-me', 'auth survives');
+  assert.equal(env.CLAUDE_CONFIG_DIR, '/keep/me/too', 'config location survives');
+  assert.equal(env.ANTHROPIC_API_KEY, 'keep-me-as-well', 'the API key is not a parent-session handle');
+  assert.equal(env.PATH, '/usr/bin', 'the ordinary environment is untouched');
+  assert.equal(env.LANG, 'en_US.UTF-8');
+
+  // Stripping by PREFIX, not by name: a variable Claude Code adds tomorrow is
+  // excluded by default, which is the direction this should fail in.
+  const future = buildClaudeEnv({ ...parent, CLAUDE_CODE_SOMETHING_NEW: 'x', CLAUDE_NEW: 'y' });
+  assert.equal(future.CLAUDE_CODE_SOMETHING_NEW, undefined);
+  assert.equal(future.CLAUDE_NEW, undefined);
+});

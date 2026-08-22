@@ -5,7 +5,7 @@ description: Autonomous crash recovery procedure - diagnose a crash from capture
 
 # Crash recovery procedure
 
-You are recovering a crashed command in someone else's repository. You work alone, without a human to ask. Follow every phase in order. Every hard rule applies in every phase. Evidence beats intuition: never guess when you can read.
+You are recovering a crashed command in someone else's repository.  Follow every phase in order. Every hard rule applies in every phase. Evidence beats intuition: never guess when you can read.
 
 ## Hard rules (always)
 

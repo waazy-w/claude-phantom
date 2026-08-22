@@ -92,3 +92,36 @@ test('the plugin ships in the npm tarball', () => {
   const pkg = readJson('package.json');
   assert.ok((pkg.files || []).includes('plugin'), 'package.json files includes the plugin directory');
 });
+
+test('the /phantom:recover allowlist does not grant what the skill forbids', () => {
+  // Slash-command frontmatter has no deny list, so the allow list IS the
+  // boundary. `Bash(git *)` auto-approved git push, reset --hard, checkout,
+  // clean and commit -- every single thing the skill's hard rules forbid and
+  // buildDisallowedTools() denies on the headless path.
+  const md = fs.readFileSync(path.join(root, 'plugin', 'commands', 'recover.md'), 'utf8');
+  const line = md.split('\n').find((l) => l.startsWith('allowed-tools:'));
+  assert.ok(line, 'the command declares an allow list');
+
+  assert.ok(!/Bash\(git \*\)/.test(line), 'no blanket git grant: ' + line);
+  for (const forbidden of ['git push', 'git reset', 'git clean', 'git rebase', 'git merge']) {
+    assert.ok(!line.includes(forbidden), line + ' must not grant ' + forbidden);
+  }
+  // The mutations the command's own Setup and Finish sections need are still there.
+  for (const needed of ['Bash(git checkout -b:*)', 'Bash(git add:*)', 'Bash(git commit:*)', 'Bash(git diff:*)']) {
+    assert.ok(line.includes(needed), 'still grants what it needs: ' + needed);
+  }
+});
+
+test('the plugin ships the post-mortem template its command points at', () => {
+  // The command told the model to use `templates/post-mortem.md` "or the
+  // installed plugin's copy" -- and the plugin shipped no templates/ directory,
+  // so an interactive recovery in someone else's repo fell through to "the same
+  // section order from memory" every time and drifted from the headless report.
+  const shipped = path.join(root, 'plugin', 'templates', 'post-mortem.md');
+  assert.ok(fs.existsSync(shipped), 'plugin/templates/post-mortem.md exists');
+  assert.equal(
+    fs.readFileSync(shipped, 'utf8'),
+    fs.readFileSync(path.join(root, 'templates', 'post-mortem.md'), 'utf8'),
+    'byte-identical to the root copy, or the two reports drift apart',
+  );
+});

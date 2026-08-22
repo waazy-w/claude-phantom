@@ -1,7 +1,7 @@
 ---
 description: Recover from a crash interactively - diagnose, write a failing test, patch on a phantom/fix-* branch, verify, and write a post-mortem
 argument-hint: "[path to .phantom/crashes/*.json | pasted error text]"
-allowed-tools: Read, Edit, Write, MultiEdit, Grep, Glob, Bash(git *), Bash(npm test *), Bash(npm test), Bash(npm run test *), Bash(npx vitest *), Bash(npx jest *), Bash(npx mocha *), Bash(node *), Bash(ls *), Bash(ls), Bash(cat *), Bash(head *), Bash(tail *), Bash(pwd)
+allowed-tools: Read, Edit, Write, MultiEdit, Grep, Glob, Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(git rev-parse:*), Bash(git branch:*), Bash(git stash list:*), Bash(git checkout -b:*), Bash(git add:*), Bash(git commit:*), Bash(npm test *), Bash(npm test), Bash(npm run test *), Bash(npx vitest *), Bash(npx jest *), Bash(npx mocha *), Bash(node *), Bash(ls *), Bash(ls), Bash(cat *), Bash(head *), Bash(tail *), Bash(pwd)
 ---
 
 Recover from a crash using the `crash-recovery` skill. You are running interactively, so you own the git branch setup that phantom's CLI would otherwise handle.
@@ -24,7 +24,7 @@ Recover from a crash using the `crash-recovery` skill. You are running interacti
 
 ## Procedure
 
-Follow the `crash-recovery` skill phases 0 through 5 exactly, with at most 3 verification attempts. Write the report to `.phantom/reports/<YYYYMMDD-HHmmss>-<slug>.md` using the template at `templates/post-mortem.md` if present in the repo (or the installed plugin's copy), otherwise use the same section order from memory.
+Follow the `crash-recovery` skill phases 0 through 5 exactly, with at most 3 verification attempts. Write the report to `.phantom/reports/<YYYYMMDD-HHmmss>-<slug>.md` using the template at `${CLAUDE_PLUGIN_ROOT}/templates/post-mortem.md`, which ships with this plugin. If it cannot be read, fall back to `templates/post-mortem.md` in the repo, and only then to the same section order from memory.
 
 ## Finish
 

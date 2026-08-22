@@ -268,14 +268,41 @@ function buildClaudeArgs(opts) {
 }
 
 /** Environment for the claude child: inherits, minus nested-session markers. */
+/**
+ * Variables phantom must NOT strip: they are how the session authenticates and
+ * finds its own configuration, not how the parent talks to it.
+ */
+const KEEP_CLAUDE_ENV = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR']);
+
+/**
+ * The environment for the recovery session, with the parent session's own
+ * variables removed.
+ *
+ * Deleting `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` was not enough. Running
+ * inside Claude Code exports ten of these, and two of them are a capability:
+ * `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` are a
+ * unix-domain socket and bearer token addressed at the USER'S LIVE SESSION. A
+ * recovery agent that phantom deliberately denies WebFetch, curl, git push and
+ * Task was inheriting a channel back into the session that launched it --
+ * a larger capability than anything on the deny list.
+ *
+ * `CLAUDE_EFFORT` matters for a duller reason: it silently set the recovery's
+ * reasoning effort from whatever the outer session happened to be using, so
+ * cost and quality depended on an invisible inherited value.
+ *
+ * Stripping by prefix rather than by name means a variable Claude Code adds
+ * later is excluded by default, which is the right direction for this to fail.
+ */
 function buildClaudeEnv(base = process.env) {
   const env = { ...base };
-  delete env.CLAUDECODE;
-  delete env.CLAUDE_CODE_ENTRYPOINT;
+  for (const key of Object.keys(env)) {
+    if (KEEP_CLAUDE_ENV.has(key)) continue;
+    if (key === 'CLAUDECODE' || key === 'AI_AGENT' || /^CLAUDE(_CODE)?_/.test(key)) delete env[key];
+  }
   return env;
 }
 
 module.exports = {
   buildPrompt, buildResumePrompt, buildAllowedTools, buildDisallowedTools, buildSettings, buildClaudeArgs, buildClaudeEnv,
-  loadSkill, shellSingleQuote, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
+  loadSkill, shellSingleQuote, KEEP_CLAUDE_ENV, PHANTOM_FILLS, CONTEXT_BYTE_BUDGET, SKILL_PATH, DEFAULT_MAX_TURNS, RESUME_MAX_TURNS,
 };

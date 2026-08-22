@@ -80,11 +80,42 @@ const visibleLength = (s) => {
   return width;
 };
 
+/** Split `s` after `width` display columns, ANSI-aware. */
+function sliceColumns(s, width) {
+  let out = '';
+  let used = 0;
+  for (const ch of s) {
+    const w = charWidth(ch.codePointAt(0));
+    if (used + w > width) break;
+    out += ch;
+    used += w;
+  }
+  return out;
+}
+
+/**
+ * Wrap `line` to `width` display columns.
+ *
+ * Splitting on spaces alone left any single token longer than `width` on its
+ * own over-long row, and banner() then sized the box to that row -- so a long
+ * report path drew a border WIDER than the terminal, which the terminal then
+ * wrapped into garbage. Hard-breaking an unbreakable token is the floor that
+ * keeps the box inside its own bounds no matter what a caller passes.
+ */
 function wrap(line, width) {
   if (visibleLength(line) <= width) return [line];
   const out = [];
   let cur = '';
+  const push = (chunk) => {
+    let rest = chunk;
+    while (visibleLength(rest) > width) {
+      out.push(sliceColumns(rest, width));
+      rest = rest.slice(sliceColumns(rest, width).length);
+    }
+    cur = rest;
+  };
   for (const w of line.split(' ')) {
+    if (visibleLength(w) > width) { if (cur) { out.push(cur); cur = ''; } push(w); continue; }
     if (cur && visibleLength(cur) + 1 + visibleLength(w) > width) { out.push(cur); cur = w; }
     else cur = cur ? cur + ' ' + w : w;
   }
@@ -102,7 +133,9 @@ function banner(lines, opts = {}) {
   const cols = stream.columns || 80;
   const maxWidth = Math.max(20, Math.min(cols - 4, 100));
   const rows = (Array.isArray(lines) ? lines : String(lines).split('\n')).flatMap((l) => wrap(l, maxWidth));
-  const width = rows.reduce((w, l) => Math.max(w, visibleLength(l)), 0);
+  // Clamped, not just measured. Sizing to the widest row let one over-long
+  // token draw a box wider than the terminal.
+  const width = Math.min(maxWidth, rows.reduce((w, l) => Math.max(w, visibleLength(l)), 0));
   const pad = (l) => l + ' '.repeat(width - visibleLength(l));
   const out = [
     frame('╭' + '─'.repeat(width + 2) + '╮'),
@@ -287,4 +320,4 @@ function setStream(s) {
   stream = s || process.stderr;
 }
 
-module.exports = { colors, banner, log, spinner, ask, openTerminal, setStream, colorsEnabled, visibleLength };
+module.exports = { colors, banner, log, spinner, ask, openTerminal, setStream, colorsEnabled, visibleLength, charWidth, wrap, sliceColumns };
