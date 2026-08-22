@@ -16,6 +16,8 @@ test('defaults match the design doc', () => {
     testCommand: null,
     maxIterations: 3,
     maxMinutes: 15,
+    maxTokens: null,
+    maxCostUsd: null,
     neverTouch: ['.env', '.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '**/*.secret*', '.git/**', 'node_modules/**'],
     webhook: null,
     notify: false,
@@ -124,4 +126,93 @@ test('keepReports is validated like the other bounded integers', () => {
   assert.throws(() => loadConfig(tmp(), { keepReports: -1 }), /keepReports/);
   assert.throws(() => loadConfig(tmp(), { keepReports: 99999 }), /keepReports/);
   assert.throws(() => loadConfig(tmp(), { keepReports: 'lots' }), /keepReports/);
+});
+
+test('environment variables sit between the flags and the config files', () => {
+  // The FAQ recommends running phantom in CI with --dry-run, but every setting
+  // that mattered there could only be changed by committing a .phantomrc into
+  // the repository. Env is the layer a container or a CI job can actually use.
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, '.phantomrc'), JSON.stringify({ model: 'from-file', maxMinutes: 5, notify: true }));
+
+  const fromFile = loadConfig(dir, {}, { env: {} });
+  assert.equal(fromFile.model, 'from-file');
+
+  // Env beats the file: a repo that ships a .phantomrc must not silently make
+  // `PHANTOM_MODEL=... phantom npm test` do nothing.
+  const fromEnv = loadConfig(dir, {}, { env: { PHANTOM_MODEL: 'from-env', PHANTOM_MAX_MINUTES: '42' } });
+  assert.equal(fromEnv.model, 'from-env');
+  assert.equal(fromEnv.maxMinutes, 42);
+  assert.equal(fromEnv.notify, true, 'and leaves untouched keys to the file');
+  assert.ok(fromEnv.loadedFrom.includes('environment'));
+
+  // Flags beat env, because a flag is this one invocation.
+  assert.equal(loadConfig(dir, { model: 'from-flag' }, { env: { PHANTOM_MODEL: 'from-env' } }).model, 'from-flag');
+
+  // Values are coerced and validated, not passed through as strings.
+  assert.equal(typeof loadConfig(dir, {}, { env: { PHANTOM_MAX_ITERATIONS: '2' } }).maxIterations, 'number');
+  for (const [name, value] of [['PHANTOM_NOTIFY', 'yes'], ['PHANTOM_AUTO_COMMIT', 'off'], ['PHANTOM_VERIFY_COMMAND', '0']]) {
+    assert.equal(typeof loadConfig(dir, {}, { env: { [name]: value } })[require('../src/config').ENV_KEYS[name]], 'boolean');
+  }
+  // An unparseable boolean is an error, not a silent false -- PHANTOM_NOTIFY=maybe
+  // quietly meaning "off" is exactly the misconfiguration that wastes an afternoon.
+  assert.throws(() => loadConfig(dir, {}, { env: { PHANTOM_NOTIFY: 'maybe' } }), /must be true or false/);
+  assert.throws(() => loadConfig(dir, {}, { env: { PHANTOM_MAX_MINUTES: 'soon' } }), /whole number/);
+  // Bounds still apply to a value that arrived through the environment.
+  assert.throws(() => loadConfig(dir, {}, { env: { PHANTOM_MAX_ITERATIONS: '99' } }), /maxIterations/);
+  // An empty var is "not set", so an exported-but-blank variable is harmless.
+  assert.equal(loadConfig(dir, {}, { env: { PHANTOM_MODEL: '' } }).model, 'from-file');
+  // "null" turns an inherited setting back off for one run.
+  assert.equal(loadConfig(dir, {}, { env: { PHANTOM_MODEL: 'null' } }).model, null);
+});
+
+test('--config uses the named file and fails loudly when it is missing', () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, '.phantomrc'), JSON.stringify({ model: 'default-file' }));
+  fs.writeFileSync(path.join(dir, 'ci.json'), JSON.stringify({ model: 'ci-file', maxMinutes: 3 }));
+
+  const cfg = loadConfig(dir, {}, { configPath: 'ci.json' });
+  assert.equal(cfg.model, 'ci-file', 'the named file wins over the searched one');
+  assert.equal(cfg.maxMinutes, 3);
+
+  // A typo must not silently fall back to the search: that turns "my settings
+  // had no effect" into a mystery instead of an error.
+  assert.throws(() => loadConfig(dir, {}, { configPath: 'nope.json' }), /config file not found/);
+  fs.writeFileSync(path.join(dir, 'bad.json'), '{ not json');
+  assert.throws(() => loadConfig(dir, {}, { configPath: 'bad.json' }), /invalid JSON/);
+});
+
+test('a --config parse error never echoes the file it read', () => {
+  // Node embeds the first bytes of the input in its JSON parse error, so
+  // `--config ../secrets.env` printed the start of whatever it read back to
+  // the terminal. The position is enough to fix a real config file.
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'secret.txt'), 'SUPER_SECRET_TOKEN=sk-ant-abcdef123456\n');
+  try {
+    loadConfig(dir, {}, { configPath: 'secret.txt' });
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.match(err.message, /invalid JSON in secret\.txt/);
+    assert.ok(!/SUPER_SECRET|sk-ant/.test(err.message), 'leaked content: ' + err.message);
+  }
+});
+
+test('the nearest config file wins, whichever kind it is', () => {
+  // The layer order was [defaults, pkg, rc, env, flags] unconditionally, so a
+  // .phantomrc at the git ROOT beat a package.json "phantom" field in the
+  // directory you actually ran from -- the opposite of the "nearest first,
+  // first hit wins" rule both the help text and the README state.
+  const root = tmp();
+  fs.mkdirSync(path.join(root, 'sub'));
+  fs.writeFileSync(path.join(root, '.phantomrc'), JSON.stringify({ model: 'rc-at-root' }));
+  fs.writeFileSync(path.join(root, 'sub', 'package.json'), JSON.stringify({ phantom: { model: 'pkg-in-sub' } }));
+
+  assert.equal(loadConfig(path.join(root, 'sub')).model, 'pkg-in-sub', 'the nearer file wins');
+  assert.equal(loadConfig(root).model, 'rc-at-root');
+
+  // Same directory: .phantomrc is the more specific of the two and still wins.
+  const flat = tmp();
+  fs.writeFileSync(path.join(flat, '.phantomrc'), JSON.stringify({ model: 'from-rc' }));
+  fs.writeFileSync(path.join(flat, 'package.json'), JSON.stringify({ phantom: { model: 'from-pkg' } }));
+  assert.equal(loadConfig(flat).model, 'from-rc');
 });

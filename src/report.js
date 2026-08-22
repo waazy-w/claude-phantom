@@ -260,6 +260,10 @@ function appendVerification(markdown, info) {
     ['Tokens', formatTokens(info.tokens, info.cachedTokens)],
     ['Session', sessionCell(info.sessionId)],
   ];
+  // Only when a ceiling was configured. Printing a dollar figure unconditionally
+  // would state what the user was charged, which phantom does not know -- and
+  // test/report.test.js pins that phantom never volunteers one.
+  if (info.budget) rows.push(['Spend ceiling', info.budget]);
   if (info.restoreHint) rows.push(['Stashed changes', 'restore with ' + code(info.restoreHint)]);
   const section = [
     '## Verification (independent)',

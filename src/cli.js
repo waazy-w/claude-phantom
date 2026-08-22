@@ -18,18 +18,45 @@ class UsageError extends Error {
   }
 }
 
-const VALUE_FLAGS = { '--test': 'test', '--max-iterations': 'maxIterations', '--max-minutes': 'maxMinutes', '--model': 'model' };
+const VALUE_FLAGS = {
+  '--test': 'test',
+  '--max-iterations': 'maxIterations',
+  '--max-minutes': 'maxMinutes',
+  '--model': 'model',
+  '--webhook': 'webhook',
+  '--config': 'config',
+};
+
+/**
+ * Boolean flags, and the value each one sets.
+ *
+ * Every boolean is negatable in both directions on purpose. The old table only
+ * had the "on" half of each pair, and overrides were emitted only when a flag
+ * was truthy -- so once a `.phantomrc` set `notify: true`, `autoCommit: true`
+ * or `promptOnFinish: true`, there was no way to turn it off for a single run
+ * without editing the file. A config you cannot override from the command line
+ * is a config that makes people edit files they did not want to change.
+ */
 const BOOL_FLAGS = {
-  '--dry-run': 'dryRun',
-  '--allow-dirty': 'allowDirty',
-  '--no-commit': 'noCommit',
-  '--no-prompt': 'noPrompt',
-  '--notify': 'notify',
-  '--verbose': 'verbose',
-  '--version': 'version',
-  '-V': 'version',
-  '--help': 'help',
-  '-h': 'help',
+  '--dry-run': ['dryRun', true],
+  '--allow-dirty': ['allowDirty', true],
+  '--no-commit': ['noCommit', true],
+  '--commit': ['noCommit', false],
+  '--no-prompt': ['noPrompt', true],
+  '--prompt': ['noPrompt', false],
+  '--notify': ['notify', true],
+  '--no-notify': ['notify', false],
+  '--verify': ['verifyCommand', true],
+  '--no-verify': ['verifyCommand', false],
+  '--verbose': ['verbose', true],
+  '--version': ['version', true],
+  '-V': ['version', true],
+  '--help': ['help', true],
+  '-h': ['help', true],
+  // `phantom recover` only; harmless elsewhere, and keeping them in the one
+  // table means the subcommand reuses the same parser rather than a second one.
+  '--list': ['list', true],
+  '--force': ['force', true],
 };
 
 /**
@@ -47,10 +74,25 @@ const BOOL_FLAGS = {
  * @property {boolean} help
  */
 
+/**
+ * Phantom's own verbs, dispatched before the wrapped-command parsing.
+ *
+ * `parseArgs` exists to split phantom's flags from the program it wraps, so it
+ * would eat `--dry-run` as phantom's own and reject `--older-than` outright --
+ * neither would ever reach `clean`. Checking argv[0] first leaves the escape
+ * hatch intact: `phantom -- ls -la` has `--` at argv[0], so it still wraps the
+ * real `ls`.
+ */
+const SUBCOMMANDS = new Set(['doctor', 'ls', 'clean', 'recover']);
+
 function defaultFlags() {
+  // The tri-state booleans start as null, not false: "not mentioned" has to be
+  // distinguishable from "explicitly turned off", or `--no-notify` cannot beat
+  // a config file that turned it on.
   return {
     dryRun: false, allowDirty: false, test: null, maxIterations: null, maxMinutes: null,
-    model: null, noCommit: false, noPrompt: false, notify: false, verbose: false, version: false, help: false,
+    model: null, webhook: null, config: null, noCommit: null, noPrompt: null, notify: null,
+    verifyCommand: null, verbose: false, version: false, help: false, list: false, force: false,
   };
 }
 
@@ -82,7 +124,8 @@ function parseArgs(argv) {
     }
     if (name in BOOL_FLAGS) {
       if (inlineValue !== undefined) throw new UsageError(name + ' does not take a value');
-      flags[BOOL_FLAGS[name]] = true;
+      const [key, value] = BOOL_FLAGS[name];
+      flags[key] = value;
       i++;
       continue;
     }
@@ -116,6 +159,12 @@ function helpText() {
     'own Ctrl+C), phantom captures the crash and runs a headless Claude Code session',
     'to diagnose and fix it on a phantom/fix-* branch. The original exit code is kept.',
     '',
+    'Subcommands:',
+    '  phantom doctor        check everything a recovery needs, before your first crash',
+    '  phantom ls            list this repo\'s crash captures, post-mortems and fix branches',
+    '  phantom clean         prune merged phantom/fix-* branches and old captures',
+    '  phantom recover       replay a saved crash without waiting for it to happen again',
+    '',
     'Flags:',
     '  --dry-run             diagnose and propose a diff; never change the working tree',
     '  --allow-dirty         recover even with uncommitted changes (stashes them first)',
@@ -123,32 +172,141 @@ function helpText() {
     '  --max-iterations <n>  fix/verify loop cap, 1-10 (default 3)',
     '  --max-minutes <n>     wall-clock cap for recovery, 1-120 (default 15)',
     '  --model <m>           model passed to claude --model',
+    '  --webhook <url>       POST a JSON summary when recovery ends',
+    '  --config <path>       use this config file instead of searching for one',
     '  --no-commit           leave the fix uncommitted on the phantom branch',
     '  --no-prompt           never ask whether to merge or delete the fix branch',
     '  --notify              desktop notification on crash and when recovery ends',
+    '  --no-verify           skip re-running the crashed command after the tests pass',
     '  --verbose             stream Claude progress and phantom debug output',
-    '  --version             print version',
-    '  --help                print this help',
+    '  --version, -V         print version',
+    '  --help, -h            print this help',
+    '',
+    'Every boolean flag negates, so a setting in your config file can be turned off',
+    'for a single run: --commit, --prompt, --no-notify, --verify.',
     '',
     'Everything after the command is passed through verbatim, so',
     '  phantom npm run dev --verbose',
     'gives --verbose to npm, not phantom. Use --verbose before the command for phantom.',
     '',
-    'Env: PHANTOM_DISABLED=1 makes phantom a pure passthrough.',
-    'Config: .phantomrc (JSON) or the "phantom" field of package.json.',
+    'Env: PHANTOM_DISABLED=1 makes phantom a pure passthrough. Settings can also come',
+    'from PHANTOM_TEST, PHANTOM_MODEL, PHANTOM_MAX_ITERATIONS, PHANTOM_MAX_MINUTES,',
+    'PHANTOM_WEBHOOK, PHANTOM_CLAUDE_BIN, PHANTOM_REPORT_DIR, PHANTOM_KEEP_REPORTS,',
+    'PHANTOM_NOTIFY, PHANTOM_AUTO_COMMIT, PHANTOM_PROMPT_ON_FINISH, PHANTOM_VERIFY_COMMAND.',
+    '',
+    'Config: .phantomrc (JSON) or the "phantom" field of package.json, looked for in',
+    'the current directory first and then at the git root; first hit wins.',
+    'Precedence: flags > environment > config file > defaults.',
   ].join('\n');
 }
 
 function flagsToOverrides(flags) {
+  // `undefined` means "not set on the command line", so the layer below wins.
+  // The negatable booleans map through their tri-state: null passes through,
+  // true and false are both real overrides. Emitting an override only when a
+  // flag was truthy is what made the config one-way.
+  const pass = (v) => (v === null ? undefined : v);
   return {
-    testCommand: flags.test === null ? undefined : flags.test,
-    maxIterations: flags.maxIterations === null ? undefined : flags.maxIterations,
-    maxMinutes: flags.maxMinutes === null ? undefined : flags.maxMinutes,
-    model: flags.model === null ? undefined : flags.model,
-    autoCommit: flags.noCommit ? false : undefined,
-    promptOnFinish: flags.noPrompt ? false : undefined,
-    notify: flags.notify ? true : undefined,
+    testCommand: pass(flags.test),
+    maxIterations: pass(flags.maxIterations),
+    maxMinutes: pass(flags.maxMinutes),
+    model: pass(flags.model),
+    webhook: pass(flags.webhook),
+    autoCommit: flags.noCommit === null ? undefined : !flags.noCommit,
+    promptOnFinish: flags.noPrompt === null ? undefined : !flags.noPrompt,
+    notify: pass(flags.notify),
+    verifyCommand: pass(flags.verifyCommand),
   };
+}
+
+/**
+ * Run one of phantom's own verbs. Each module owns its flag parsing and returns
+ * an exit code; none of them call process.exit, so they stay testable.
+ */
+async function runSubcommand(name, rest, { cwd, env, io }) {
+  const out = io.stdout || process.stdout;
+  // Checked for EVERY subcommand, before anything is loaded or spawned.
+  // `phantom recover --help` used to reach runReplay and start a real headless
+  // session -- stashing, branching, patching, spending -- because the recover
+  // branch parsed the flags and then never looked at them.
+  if (rest.includes('--help') || rest.includes('-h')) { out.write(subcommandHelp(name) + '\n'); return 0; }
+  if (rest.includes('--version') || rest.includes('-V')) { out.write(readVersion() + '\n'); return 0; }
+  // The documented kill switch says phantom becomes a pure passthrough. It has
+  // to cover the one subcommand that spends money; the check lived inside
+  // replay.js behind a `config` that the CLI always supplied, so it was
+  // unreachable from the command line.
+  if (env.PHANTOM_DISABLED !== undefined && env.PHANTOM_DISABLED !== '' && env.PHANTOM_DISABLED !== '0') {
+    log.warn('PHANTOM_DISABLED is set; phantom ' + name + ' does nothing');
+    return 0;
+  }
+
+  if (name === 'doctor') {
+    // doctor took no arguments at all, so `--bogus` was accepted silently while
+    // ls and clean both reject one. Consistency matters most on the command a
+    // confused user reaches for first.
+    const unknown = rest.filter((a) => a.startsWith('-'));
+    if (unknown.length) { log.error('unknown option ' + unknown[0] + ' (see phantom doctor --help)'); return 2; }
+    const doctor = io.doctor || require('./doctor');
+    // doctor loads its own config, leniently -- a broken .phantomrc is one of
+    // the things it exists to report, so it must not stop doctor from running.
+    // Loading it here as well and passing it in was dead weight: runDoctor
+    // never read the parameters, and the two copies could disagree.
+    const result = doctor.runDoctor({ cwd, env });
+    doctor.renderDoctor(result);
+    return result.ok ? 0 : 1;
+  }
+  if (name === 'ls' || name === 'clean') {
+    const manage = io.manage || require('./manage');
+    return await manage.runSubcommand(name, rest, { cwd });
+  }
+  // recover
+  const replay = io.replay || require('./replay');
+  const parsed = parseArgs(rest);
+  const config = loadConfig(cwd, flagsToOverrides(parsed.flags), { env, configPath: parsed.flags.config });
+  const res = await replay.runReplay(
+    parsed.command === null ? [] : [parsed.command, ...parsed.args],
+    { cwd, config, flags: parsed.flags, recovery: io.recovery },
+  );
+  // A mistyped invocation exits 2 like every other usage error, so a script can
+  // tell "you typed it wrong" apart from "the replay did not fix it" (also 1).
+  return res.reason === 'usage' ? 2 : res.exitCode;
+}
+
+/** Help for one of phantom's own verbs. ls/clean own theirs; the rest live here. */
+function subcommandHelp(name) {
+  if (name === 'ls' || name === 'clean') {
+    const manage = require('./manage');
+    return name === 'ls' ? manage.lsHelp() : manage.cleanHelp();
+  }
+  if (name === 'doctor') {
+    return [
+      'Usage: phantom doctor',
+      '',
+      'Checks everything a recovery needs, before your first crash: that claude is',
+      'installed and logged in, that this is a git repository with at least one commit,',
+      'what test command phantom would run, whether desktop notifications can reach you,',
+      'and whether the status line and Claude Code plugin are wired up.',
+      '',
+      'Exits 0 when nothing failed (warnings are fine), 1 when something would stop a',
+      'recovery. Takes no options.',
+    ].join('\n');
+  }
+  return [
+    'Usage: phantom recover [flags] [<crash.json>]',
+    '',
+    'Replays a crash phantom already captured, without waiting for the command to',
+    'crash again -- for retrying a recovery that was refused because the tree was',
+    'dirty or claude was missing. Uses the newest capture in .phantom/crashes/',
+    'unless you name one.',
+    '',
+    '  --list                list the saved crashes, newest first, and stop',
+    '  --force               replay a capture phantom judged too old or off-base',
+    '  --dry-run             diagnose only; no branch, no edits',
+    '  --no-prompt           do not ask whether to merge or delete the fix branch',
+    '',
+    'Flags go before the file. The test command recorded in a capture is ignored:',
+    'phantom resolves it from your config, so a saved file cannot choose what runs.',
+  ].join('\n');
 }
 
 function describeCommand(command, args) {
@@ -168,6 +326,28 @@ async function main(argv = process.argv.slice(2), io = {}) {
   const cwd = io.cwd || process.cwd();
   const env = io.env || process.env;
   const out = io.stdout || process.stdout;
+
+  // A subcommand placed after phantom's flags is a mistake worth naming rather
+  // than acting on: `phantom --verbose ls` used to run /bin/ls silently, and
+  // `phantom --dry-run recover` died with "command not found: recover". Both
+  // look like phantom commands and neither behaves like one.
+  const misplaced = argv.findIndex((a) => SUBCOMMANDS.has(a));
+  if (misplaced > 0 && argv[0] !== '--' && argv[0].startsWith('-')) {
+    log.error('phantom ' + argv[misplaced] + ' is a subcommand, so it goes first: '
+      + 'phantom ' + argv[misplaced] + ' ' + argv.filter((a, i) => i !== misplaced).join(' '));
+    log.error('to wrap a program of that name instead, use: phantom -- ' + argv.slice(misplaced).join(' '));
+    return 2;
+  }
+
+  if (SUBCOMMANDS.has(argv[0])) {
+    try {
+      return await runSubcommand(argv[0], argv.slice(1), { cwd, env, io });
+    } catch (err) {
+      if (err instanceof ConfigError || err instanceof UsageError) { log.error(err.message); return 2; }
+      log.error((err && err.stack) ? err.stack : String(err));
+      return 1;
+    }
+  }
   let parsed;
   try {
     parsed = parseArgs(argv);
@@ -190,7 +370,7 @@ async function main(argv = process.argv.slice(2), io = {}) {
   let config = null;
   if (!disabled) {
     try {
-      config = loadConfig(cwd, flagsToOverrides(flags));
+      config = loadConfig(cwd, flagsToOverrides(flags), { env, configPath: flags.config });
     } catch (err) {
       if (!(err instanceof ConfigError)) throw err;
       log.error('config error: ' + err.message);

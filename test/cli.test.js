@@ -32,9 +32,53 @@ test('parseArgs: -- separator, = values, all flags', () => {
   assert.deepStrictEqual(r.args, ['-x']);
   assert.deepStrictEqual(r.flags, {
     dryRun: true, allowDirty: true, test: 'npm run check', maxIterations: null, maxMinutes: 9,
-    model: 'm1', noCommit: true, noPrompt: true, notify: false, verbose: false, version: false, help: false,
+    model: 'm1', webhook: null, config: null, noCommit: true, noPrompt: true, notify: null,
+    verifyCommand: null, verbose: false, version: false, help: false, list: false, force: false,
   });
-  assert.deepStrictEqual(flagsToOverrides(r.flags), { testCommand: 'npm run check', maxIterations: undefined, maxMinutes: 9, model: 'm1', autoCommit: false, promptOnFinish: false, notify: undefined });
+  assert.deepStrictEqual(flagsToOverrides(r.flags), {
+    testCommand: 'npm run check', maxIterations: undefined, maxMinutes: 9, model: 'm1',
+    webhook: undefined, autoCommit: false, promptOnFinish: false, notify: undefined, verifyCommand: undefined,
+  });
+});
+
+test('every boolean flag negates, so a config file can be overridden for one run', () => {
+  // The table used to carry only the "on" half of each pair, and an override was
+  // emitted only when a flag was truthy -- so once a .phantomrc set notify,
+  // autoCommit or promptOnFinish to true there was no way to turn it off for a
+  // single run without editing the file.
+  const off = parseArgs(['--no-notify', '--commit', '--prompt', '--no-verify', 'npm', 'test']);
+  assert.strictEqual(off.flags.notify, false);
+  assert.strictEqual(off.flags.noCommit, false);
+  assert.strictEqual(off.flags.noPrompt, false);
+  assert.strictEqual(off.flags.verifyCommand, false);
+  assert.deepStrictEqual(flagsToOverrides(off.flags), {
+    testCommand: undefined, maxIterations: undefined, maxMinutes: undefined, model: undefined,
+    webhook: undefined, autoCommit: true, promptOnFinish: true, notify: false, verifyCommand: false,
+  });
+
+  // Unmentioned stays undefined, so the layer below still wins. This is the
+  // distinction the old two-state booleans could not make.
+  const silent = parseArgs(['npm', 'test']);
+  const o = flagsToOverrides(silent.flags);
+  assert.strictEqual(o.notify, undefined);
+  assert.strictEqual(o.autoCommit, undefined);
+  assert.strictEqual(o.promptOnFinish, undefined);
+  assert.strictEqual(o.verifyCommand, undefined);
+
+  // And the "on" direction still works.
+  const on = parseArgs(['--notify', '--verify', 'npm', 'test']);
+  assert.strictEqual(flagsToOverrides(on.flags).notify, true);
+  assert.strictEqual(flagsToOverrides(on.flags).verifyCommand, true);
+});
+
+test('--webhook and --config are parsed as value flags', () => {
+  const r = parseArgs(['--webhook', 'https://example.com/hook', '--config', './ci.phantomrc', 'npm', 'test']);
+  assert.strictEqual(r.flags.webhook, 'https://example.com/hook');
+  assert.strictEqual(r.flags.config, './ci.phantomrc');
+  assert.strictEqual(r.command, 'npm');
+  assert.strictEqual(flagsToOverrides(r.flags).webhook, 'https://example.com/hook');
+  assert.throws(() => parseArgs(['--webhook']), /requires a value/);
+  assert.throws(() => parseArgs(['--config']), /requires a value/);
 });
 
 test('parseArgs: edge cases', () => {
@@ -253,4 +297,68 @@ test('bin/phantom.js is executable and runs end to end', () => {
     status = e.status;
   }
   assert.strictEqual(status, 5);
+});
+
+test('a subcommand --help never starts work', async () => {
+  // `phantom recover --help` used to reach runReplay and launch a real headless
+  // session -- stashing, branching, patching, spending -- because the recover
+  // branch parsed the flags and then never looked at them. Help must be
+  // answered before anything is loaded or spawned.
+  for (const name of ['doctor', 'ls', 'clean', 'recover']) {
+    for (const flag of ['--help', '-h']) {
+      const out = capture();
+      let recoveryRan = false;
+      const code = await main([name, flag], {
+        cwd: process.cwd(), stdout: out, stderr: capture(),
+        recovery: { runRecovery: async () => { recoveryRan = true; return { status: 'fixed', message: 'x' }; } },
+      });
+      assert.strictEqual(code, 0, name + ' ' + flag);
+      assert.match(out.text(), /Usage: phantom /, name + ' ' + flag + ' printed help');
+      assert.ok(!recoveryRan, name + ' ' + flag + ' must not start a recovery');
+    }
+  }
+});
+
+test('PHANTOM_DISABLED stops the subcommands too, not just the wrapper', async () => {
+  // The documented kill switch says phantom becomes a pure passthrough. The
+  // check lived inside replay.js behind a `config` the CLI always supplied, so
+  // it was unreachable from the command line -- for the one subcommand that
+  // spends money.
+  for (const name of ['doctor', 'ls', 'clean', 'recover']) {
+    let recoveryRan = false;
+    const err = capture();
+    ui.setStream(err);
+    try {
+      const code = await main([name], {
+        cwd: process.cwd(), env: { ...process.env, PHANTOM_DISABLED: '1' },
+        stdout: capture(), stderr: capture(),
+        recovery: { runRecovery: async () => { recoveryRan = true; return { status: 'fixed', message: 'x' }; } },
+      });
+      assert.strictEqual(code, 0, name);
+      assert.ok(!recoveryRan, name + ' must not run while disabled');
+      assert.match(err.text(), /PHANTOM_DISABLED is set/, name);
+    } finally { ui.setStream(null); }
+  }
+});
+
+test('a subcommand placed after phantom\'s flags is named, not silently misrouted', async () => {
+  // `phantom --verbose ls` ran /bin/ls with no warning; `phantom --dry-run
+  // recover` died with "command not found: recover". Both look like phantom
+  // commands and neither behaved like one.
+  const err = capture();
+  ui.setStream(err);
+  try {
+    const code = await main(['--verbose', 'ls'], { cwd: process.cwd(), stdout: capture(), stderr: capture() });
+    assert.strictEqual(code, 2);
+    assert.match(err.text(), /is a subcommand, so it goes first/);
+    assert.match(err.text(), /phantom -- ls/, 'and points at the escape hatch');
+  } finally { ui.setStream(null); }
+
+  // The escape hatch itself still works: `--` first means wrap the real program.
+  const out = capture();
+  const code = await main(['--', 'node', '-e', 'process.stdout.write("real")'], {
+    cwd: process.cwd(), stdout: out, stderr: capture(),
+  });
+  assert.strictEqual(code, 0);
+  assert.strictEqual(out.text(), 'real');
 });

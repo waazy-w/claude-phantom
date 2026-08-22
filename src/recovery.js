@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const git = require('./git');
+const { Budget } = require('./budget');
 const { commandLineOf } = require('./context');
 const { ensureExcluded } = git;
 const ui = require('./ui');
@@ -205,6 +206,20 @@ function pruneDir(dir, keep, suffix) {
     try { fs.unlinkSync(path.join(dir, name)); removed++; } catch { /* raced with another run */ }
   }
   return removed;
+}
+
+/**
+ * `<ts>-<slug>`, with a counter appended if that pair is already taken.
+ * @returns {string} basename without extension
+ */
+function uniqueStamp(dir, ts, slug) {
+  const base = ts + '-' + slug;
+  let name = base;
+  for (let n = 2; n < 100; n++) {
+    if (!fs.existsSync(path.join(dir, name + '.json'))) return name;
+    name = base + '-' + n;
+  }
+  return name;
 }
 
 function phantomDirOf(reportDir) {
@@ -450,9 +465,17 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const crashDir = path.resolve(reportDirAbs, '..', 'crashes');
     fs.mkdirSync(crashDir, { recursive: true });
     fs.mkdirSync(reportDirAbs, { recursive: true });
-    const crashPath = path.join(crashDir, ts + '-' + ctx.slug + '.json');
+    // Unique even within the same second. `timestamp()` has 1-second
+    // resolution, so two quick crashes with the same slug wrote the same two
+    // filenames: the second capture silently overwrote the first, and the
+    // report was APPENDED to (report.js reads an existing file as the session's
+    // output), producing one post-mortem carrying two Verification blocks.
+    // Invisible until `phantom ls` started listing captures and `phantom
+    // recover` started replaying them.
+    const stamp = uniqueStamp(crashDir, ts, ctx.slug);
+    const crashPath = path.join(crashDir, stamp + '.json');
     fs.writeFileSync(crashPath, JSON.stringify(ctx, null, 2));
-    s.reportPath = path.join(reportDirAbs, ts + '-' + ctx.slug + '.md');
+    s.reportPath = path.join(reportDirAbs, stamp + '.md');
     const reportRel = path.relative(s.root, s.reportPath).replace(/\\/g, '/');
     log.verbose('crash context saved to ' + path.relative(s.root, crashPath));
 
@@ -495,14 +518,26 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     let lastTest = null;
     let tokens = 0;
     let cached = 0;
+    // Silent unless the user configured a ceiling; both default to null.
+    const budget = new Budget({ maxTokens: config.maxTokens, maxCostUsd: config.maxCostUsd, model: config.model });
+    let overBudget = null;
     let repro = null;
     const reproTimeoutMs = Number(hooks.reproTimeoutMs) > 0 ? Number(hooks.reproTimeoutMs) : REPRO_TIMEOUT_MS;
     let timedOut = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      iterations = attempt;
+      // `iterations` is claimed only once this attempt is actually going to
+      // happen. Setting it at the top counted the attempt that the two checks
+      // below then refused, so the banner said "stopped after 2 attempt(s)"
+      // beside a token total from one -- two facts that contradict each other.
       const remaining = deadline - Date.now();
       if (remaining <= 0) { timedOut = true; break; }
+      // Checked before the attempt is paid for, and never before the first one:
+      // with nothing spent yet every ceiling is affordable, so a budget can
+      // shorten a recovery but can never stop phantom from trying at all.
+      const afford = budget.canAfford();
+      if (!afford.affordable) { overBudget = afford.reason; log.warn('spend ceiling: ' + afford.reason); break; }
+      iterations = attempt;
       const resuming = attempt > 1 && sessionId;
       log.info(resuming
         ? 'tests still failing; resuming session with the output (attempt ' + attempt + '/' + maxAttempts + ')…'
@@ -525,6 +560,9 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
       lastClaude = res.json;
       tokens += report.sumTokens(res.json.usage);
       cached += report.cachedTokens(res.json.usage);
+      // Priced at the model that actually ran the attempt, which is not
+      // necessarily config.model -- that defaults to null and Claude Code picks.
+      budget.record(res.json.usage, (res.json.modelUsage && Object.keys(res.json.modelUsage)[0]) || config.model);
       if (res.timedOut) { timedOut = true; log.warn('claude session hit the ' + config.maxMinutes + ' minute cap'); break; }
       if (res.json.session_id) { sessionId = res.json.session_id; s.sessionId = sessionId; log.verbose('claude session ' + sessionId); }
       // .trim() before taking the first line. When claude fails before emitting
@@ -659,8 +697,10 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     const messages = {
       fixed: (repro ? 'fix verified by phantom: tests pass and the command no longer crashes' : 'fix verified by phantom')
         + '; your branch is unchanged',
-      unfixed: !changedFiles.length
-        ? 'the session made no changes; nothing was fixed'
+      unfixed: overBudget
+        ? 'stopped by the spend ceiling after ' + iterations + ' attempt(s): ' + overBudget
+        : !changedFiles.length
+          ? 'the session made no changes; nothing was fixed'
         : repro && !repro.fixed
           ? 'tests pass but ' + commandLineOf(ctx) + ' still exits ' + repro.code
           : testsPassed === null ? 'patch could not be verified (no test run)' : 'tests still failing after ' + iterations + ' attempt(s)',
@@ -689,6 +729,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
     md = report.appendVerification(md, {
       status, testsPassed, testCommand, testOutput: lastTest, iterations, durationMs, tokens: tokens || null, cachedTokens: cached || null, changedFiles, sessionId, repro, command: commandLineOf(ctx),
       branch: reportBranch, baseSha: s.baseSha, baseBranch: ctx.git.branch, restoreHint, neverTouchViolations: violations,
+      budget: (config.maxCostUsd || config.maxTokens) ? budget.describe() : null,
       violationOutcome: dryRun
         ? (changedFiles.length ? 'STILL ON DISK — dry run has no branch to revert' : 'reverted in place; no branch was created')
         : (changedFiles.length ? 'revert FAILED — changes are still on the branch' : 'branch hard-reverted'),
@@ -761,7 +802,7 @@ async function runRecovery(ctx, config, flags = {}, hooks = {}) {
 
     const final = result(status, message);
     // 10. Banner + webhook
-    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached });
+    printBanner(final, { ctx, s, restoreHint: s.stashed ? restoreHint : null, durationMs, tokens, cached, budget });
     try {
       const r = await notify.sendWebhook(config.webhook, notify.buildPayload(ctx, final));
       if (!r.skipped) log.verbose('webhook ' + (r.ok ? 'delivered' : 'failed: ' + (r.error || r.status)));
@@ -821,9 +862,15 @@ async function offerBranchDecision(final, { ctx, s, config, flags, opts, ask = u
   log.warn('resolve it, or back out with: git merge --abort');
 }
 
-function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached }) {
+/** Did the user actually configure a ceiling? A Budget with none stays quiet. */
+const config_hasCeiling = (budget) => Boolean(budget && (budget.maxTokens || budget.maxCostUsd));
+
+function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached, budget }) {
   const lines = [colors.bold('👻 phantom ' + describeStatus(final.status)) + colors.dim(' · ' + report.formatDuration(durationMs) + (tokens ? ' · ' + report.formatTokens(tokens, cached) : ''))];
   lines.push(final.message);
+  // Only when a ceiling was asked for. Phantom cannot see anyone's bill, so it
+  // does not volunteer a dollar figure that might be mistaken for one.
+  if (budget && (config_hasCeiling(budget))) lines.push(colors.dim('spend   ' + budget.describe()));
   if (final.branch) {
     lines.push('');
     lines.push('branch  ' + colors.bold(final.branch) + (s.stayed ? colors.yellow(' (you are on it, uncommitted)') : ''));
@@ -841,4 +888,4 @@ function printBanner(final, { ctx, s, restoreHint, durationMs, tokens, cached })
   ui.banner(lines, { color });
 }
 
-module.exports = { runRecovery, pruneDir, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };
+module.exports = { runRecovery, pruneDir, uniqueStamp, runClaude, runTests, resolveClaudeBin, parseClaudeOutput, ensureExcluded, commitMessage, timestamp, offerBranchDecision, AbortedError };

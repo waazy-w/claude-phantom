@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-22
+
+Four new subcommands, an environment-variable config layer, and a spend ceiling — built
+by four agents working in parallel, then attacked by a security team and a debugging team
+before any of it shipped. Those two teams found 14 problems in code that already passed
+446 tests, including one that let a repository run arbitrary commands on your machine.
+
+### Added
+
+- **`phantom doctor`** — one preflight for everything a recovery needs: that `claude` is
+  installed *and logged in*, that this is a git repository with at least one commit, what
+  test command phantom would run, whether desktop notifications can actually reach you,
+  and whether the status line and plugin are wired. Not being logged in is the commonest
+  first-run failure and used to surface mid-recovery as a blank error line.
+- **`phantom ls`** — this repo's fix branches, crash captures and post-mortems.
+- **`phantom clean`** — prunes them. Merged branches only by default; an unmerged fix
+  branch needs `--unmerged`. Merged deletions go through `git branch -d`, so git re-checks
+  at deletion time and a stale plan fails loudly instead of destroying work.
+- **`phantom recover`** — replays a crash phantom already captured, for retrying a
+  recovery that was refused because the tree was dirty or `claude` was missing. The
+  plugin has had `/phantom:recover` since 0.3.0; the CLI made you crash the app again.
+- **Environment-variable configuration** — fourteen `PHANTOM_*` variables, sitting between
+  the flags and the config files. A flag is this invocation, an env var is this shell or
+  CI job, a file is the repository's default. The FAQ recommended a CI recipe that
+  previously required committing a `.phantomrc`.
+- **`--config <path>`**, **`--webhook <url>`**, and **negatable booleans** — `--commit`,
+  `--prompt`, `--no-notify`, `--verify`. Booleans are tri-state internally now: "not
+  mentioned" has to be distinguishable from "explicitly off", or a config file that turned
+  something on could never be overridden without editing it.
+- **`maxTokens` / `maxCostUsd`** — a real spend ceiling. `maxIterations` and `maxMinutes`
+  bound how often phantom asks and how long it waits; neither bounds what it spends. The
+  dollar figure is an estimate from published rates, hedged as one, and phantom never
+  volunteers an amount unless you configured a ceiling. An unknown model prices as the
+  most expensive one known, because a ceiling that guesses low is passed unnoticed.
+
+### Security
+
+- **A planted crash capture could run arbitrary commands.** A crash JSON used to be a file
+  phantom only ever *wrote*; `phantom recover` makes it one phantom *reads*, and a
+  repository can ship one. `ctx.testCommand` was returned verbatim by
+  `resolveTestCommand` and executed by `runTests` with `shell: true` — and was never even
+  type-checked. Clone a repo, hit a crash, run `phantom recover`, and their shell ran.
+  The test command recorded in a capture is now discarded outright: phantom resolves it
+  locally, so a saved file does not get to choose what executes.
+- **`git.root` must be absolute.** A relative `"."` resolved against the working
+  directory, so it satisfied the wrong-repo check from *any* repository the user happened
+  to be standing in — defeating the one guard meant to stop a capture from one checkout
+  being replayed into another.
+- **`phantom clean` could delete outside the repository.** The "inside `.phantom/`"
+  boundary was computed lexically, and `unlink` follows symlinks, so a repo shipping
+  `.phantom/reports -> ../outside` produced entries that passed the check while the
+  deletion resolved through the link. Containment is now anchored on the real repository
+  root as well as the real directory.
+- **`--config` on a non-JSON file echoed its first bytes**, because Node embeds them in
+  its parse error. It reports the position now.
+
+### Fixed
+
+- **`phantom recover --help` started a real recovery.** The subcommand parsed `--help` and
+  then never looked at it, so asking for help stashed, branched, patched and spent. Help
+  and `--version` are answered for every subcommand before anything is loaded or spawned.
+- **`PHANTOM_DISABLED=1` did not stop `phantom recover`** — the check lived behind a
+  `config` the CLI always supplied, so the documented kill switch was unreachable from the
+  command line for the one subcommand that spends money.
+- **A subcommand after phantom's flags was silently misrouted**: `phantom --verbose ls`
+  ran `/bin/ls`, `phantom --dry-run recover` died with "command not found". Both are now
+  named as the mistake they are, with the `phantom -- ls` escape hatch pointed at.
+- **The budget stop counted an attempt that never ran**, so the banner said "stopped after
+  2 attempt(s)" beside a token total from one.
+- **A single-segment `reportDir` made `clean` silently unable to delete crash captures** —
+  with `reportDir: "reports"` the captures live in a *sibling* directory, which the
+  first-path-segment boundary rejected while reporting success.
+- **Two crashes in the same second overwrote each other.** The 1-second timestamp named
+  both the capture and the report, so the second run replaced the first's capture and
+  *appended* to its report, producing one post-mortem with two verification blocks.
+- **A `.phantomrc` at the git root beat a `package.json` "phantom" field in the directory
+  you ran from**, contradicting the documented "nearest first, first hit wins".
+- `phantom recover` usage errors exit 2 like every other usage error, not 1 — a script can
+  tell "you typed it wrong" from "the replay did not fix it".
+- `phantom doctor` rejects unknown options instead of ignoring every argument, and no
+  longer orphans a shim (`mise`, `asdf`, `volta`, `npx`) whose child outlives its probe.
+
 ## [0.5.0] - 2026-08-22
 
 Closes the rest of the audit: the guard bypasses, the resource leaks, and every
@@ -471,7 +553,8 @@ has a regression test, and every test was mutation-checked against the 0.3.5 beh
 - `examples/crash-demo`: a deliberately crashing sample app with `node:test` tests.
 - Zero runtime dependencies; Node >= 18.
 
-[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/waazy-w/claude-phantom/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/waazy-w/claude-phantom/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/waazy-w/claude-phantom/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/waazy-w/claude-phantom/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/waazy-w/claude-phantom/compare/v0.3.5...v0.3.6

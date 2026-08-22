@@ -191,9 +191,21 @@ The verification section and metadata are written by phantom, not the session. T
 
 ```
 phantom [flags] [--] <command> [args...]
+phantom doctor | ls | clean | recover [flags]
 ```
 
 Flags go before the command; everything after the command is passed through verbatim (`phantom npm run dev --verbose` gives `--verbose` to npm). `--` is optional.
+
+### Subcommands
+
+| Command | What it does |
+|---|---|
+| `phantom doctor` | Checks everything a recovery needs **before** your first crash: that `claude` is installed *and logged in*, that this is a git repo with at least one commit, what test command phantom would run, whether desktop notifications can actually reach you, and whether the status line and plugin are wired. Exits non-zero only on a real failure. |
+| `phantom ls` | This repo's phantom history: `phantom/fix-*` branches (merged or not, age, subject), crash captures, and post-mortems. |
+| `phantom clean` | Prunes them. Merged branches only by default — an unmerged fix branch is never deleted without `--unmerged`. `--older-than <days>`, `--all`, `--dry-run`, `--yes`. Merged branches go via `git branch -d`, so git re-checks at deletion time and a stale plan fails instead of destroying work. |
+| `phantom recover` | Replays a crash phantom already captured, without waiting for it to happen again — for retrying a recovery that was refused because the tree was dirty or `claude` was missing. Uses the newest capture unless you name one. `--list`, `--force`. |
+
+`phantom -- ls -la` still wraps the real `ls`; the separator is the escape hatch.
 
 | Flag | Effect |
 |---|---|
@@ -206,8 +218,18 @@ Flags go before the command; everything after the command is passed through verb
 | `--no-commit` | Leave the fix uncommitted on the phantom branch; phantom stays on it and prints the way back. |
 | `--no-prompt` | Never ask whether to merge or delete the fix branch; just print the commands. |
 | `--notify` | Desktop notification on crash and when recovery ends. On macOS this needs `terminal-notifier` (`brew install terminal-notifier`); without it the AppleScript fallback is silently swallowed by Notification Center — see [Desktop notification](#claude-code-integration). |
+| `--webhook <url>` | POST a JSON summary when recovery ends. |
+| `--config <path>` | Use this config file instead of searching for one. A missing file is an error, not a silent fallback. |
 | `--verbose` | Stream the session's progress lines. |
 | `--version`, `--help` | |
+
+**Every boolean flag negates**, so a setting in your config file can be turned off for a single run: `--commit`, `--prompt`, `--no-notify`, `--verify`. This is why they are tri-state internally — "not mentioned" has to be distinguishable from "explicitly off", or a `.phantomrc` that turned something on could never be overridden without editing the file.
+
+**Environment.** `PHANTOM_DISABLED=1` makes phantom a pure passthrough. Settings can also come from the environment, which sits between the flags and the config files — a flag is this invocation, an env var is this shell or this CI job, a file is the repository's default:
+
+`PHANTOM_TEST`, `PHANTOM_MODEL`, `PHANTOM_MAX_ITERATIONS`, `PHANTOM_MAX_MINUTES`, `PHANTOM_MAX_TOKENS`, `PHANTOM_MAX_COST_USD`, `PHANTOM_WEBHOOK`, `PHANTOM_CLAUDE_BIN`, `PHANTOM_REPORT_DIR`, `PHANTOM_KEEP_REPORTS`, `PHANTOM_NOTIFY`, `PHANTOM_AUTO_COMMIT`, `PHANTOM_PROMPT_ON_FINISH`, `PHANTOM_VERIFY_COMMAND`.
+
+Values are coerced and validated, and an unparseable one is an error rather than a silent default — `PHANTOM_NOTIFY=maybe` quietly meaning "off" is exactly the misconfiguration that wastes an afternoon.
 
 **Exit codes.** Always your command's exit code — a fixed crash is still exit 1, so phantom is safe in scripts and `&&` chains. Signal deaths exit `128 + signal` like a shell (`SIGSEGV` → 139). A command that cannot be found exits 127 and one that cannot be spawned exits 126, matching a shell. During recovery, Ctrl+C exits 130, `SIGTERM` exits 143 and `SIGHUP` exits 129. Invalid flags or config exit 2 before your command runs.
 
@@ -233,6 +255,8 @@ Both files are looked for in the directory you ran from **first**, then at the g
   "reportDir": ".phantom/reports",// relative to the repo, no shell metacharacters; crash captures go to the sibling crashes/
   "ringBufferBytes": 262144,      // output phantom retains for crash context (the session sees the last 200 lines of it, capped at 24 KiB)
   "keepReports": 50,              // crash JSONs and post-mortems kept per repo; 0 keeps everything
+  "maxTokens": null,              // hard token ceiling for one recovery; null = no ceiling
+  "maxCostUsd": null,             // estimated-USD ceiling for one recovery; null = no ceiling
   "claudeBin": "claude"           // Claude Code executable
 }
 ```
@@ -317,7 +341,11 @@ One thing to know about the plugin: `marketplace add` tracks this repository's `
 
 **I'm mid-change.** Phantom refuses on a dirty tree; `--allow-dirty` stashes a snapshot first and restores it automatically (also on Ctrl+C).
 
-**How much does it cost?** One to three headless turns plus test runs, bounded by `maxIterations` and `maxMinutes`; roughly a short interactive debugging session. `maxIterations: 1` and a cheaper `model` give a hard ceiling.
+**How much does it cost?** One to three headless turns plus test runs; roughly a short interactive debugging session. `maxIterations` and `maxMinutes` bound how often phantom asks and how long it waits, but neither bounds *spend* — one iteration on a large repo can cost more than three on a small one. For an actual ceiling set `maxTokens` or `maxCostUsd`: phantom then checks before each additional attempt and stops rather than starting one it cannot afford. It never blocks the first attempt, since with nothing spent every ceiling is affordable.
+
+The dollar figure is an **estimate** from published API rates, not your bill — phantom cannot see your account, and a subscription is not priced per token. When the model is unknown (the default, since Claude Code picks) it prices as the most expensive model it knows, because a ceiling that guesses low gets passed unnoticed. Phantom never volunteers a dollar amount unless you configured a ceiling.
+
+**Before the first crash, run `phantom doctor`.** It checks `claude` is installed *and logged in* — not being logged in is the commonest first-run failure, and it used to surface mid-recovery as a blank error line.
 
 **CI?** Use `--dry-run`: diagnosis and proposed diff in `.phantom/reports/`, no branch, no edits; upload `.phantom/` as an artifact. Full mode works but the branch dies with the runner since nothing is pushed.
 

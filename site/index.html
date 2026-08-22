@@ -698,11 +698,11 @@ footer a:hover { color: var(--accent-text); }
         <p class="cta-note rv" style="margin-top:10px;text-align:left">or <a href="#install">install from GitHub</a> — <code>npm i -g github:waazy-w/claude-phantom</code></p>
 
         <div class="badges rv">
-          <span class="badge">v<b>0.5.0</b></span>
+          <span class="badge">v<b>0.6.0</b></span>
           <span class="badge">dependencies <b>0</b></span>
           <span class="badge">node <b>&gt;=18</b></span>
           <span class="badge">MIT</span>
-          <span class="badge">339 tests</span>
+          <span class="badge">457 tests</span>
         </div>
       </div>
 
@@ -940,9 +940,25 @@ Wall clock               1m 48s</pre>
           <tr><td class="f">--no-commit</td><td>Leave the fix uncommitted on the phantom branch and print the way back.</td></tr>
           <tr><td class="f">--no-prompt</td><td>Never ask whether to merge or delete the fix branch; just print the commands.</td></tr>
           <tr><td class="f">--notify</td><td>Desktop notification on crash and when recovery ends.</td></tr>
+          <tr><td class="f">--webhook &lt;url&gt;</td><td>POST a JSON summary when recovery ends.</td></tr>
+          <tr><td class="f">--config &lt;path&gt;</td><td>Use this config file instead of searching. A missing file is an error, not a silent fallback.</td></tr>
           <tr><td class="f">--verbose</td><td>Stream the session's progress lines.</td></tr>
         </tbody>
       </table>
+      <p class="demo-cap" style="margin-top:14px">Every boolean negates — <code>--commit</code>, <code>--prompt</code>, <code>--no-notify</code>, <code>--verify</code> — so a setting in your config file can be turned off for one run. Settings also come from the environment (<code>PHANTOM_MODEL</code>, <code>PHANTOM_MAX_COST_USD</code>, and a dozen more), which sits between the flags and the files.</p>
+    </div>
+
+    <div class="tw rv" style="margin-top:26px">
+      <table>
+        <thead><tr><th>Subcommand</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td class="f">phantom doctor</td><td>Checks everything a recovery needs <em>before</em> your first crash: claude installed <em>and logged in</em>, a git repo with a commit, the test command it would run, whether notifications can reach you, status line and plugin wiring.</td></tr>
+          <tr><td class="f">phantom ls</td><td>This repo's fix branches, crash captures and post-mortems, newest first.</td></tr>
+          <tr><td class="f">phantom clean</td><td>Prunes them. Merged branches only by default; an unmerged fix branch needs <code>--unmerged</code>. Deletion goes through <code>git branch -d</code>, so a stale plan fails instead of destroying work.</td></tr>
+          <tr><td class="f">phantom recover</td><td>Replays a crash phantom already captured, without waiting for it to happen again — for retrying a recovery that was refused.</td></tr>
+        </tbody>
+      </table>
+      <p class="demo-cap" style="margin-top:14px"><code>phantom -- ls -la</code> still wraps the real <code>ls</code>; the separator is the escape hatch.</p>
     </div>
 
     <div class="split" style="margin-top:26px">
@@ -964,6 +980,8 @@ Wall clock               1m 48s</pre>
   <span class="key">"reportDir"</span>:       ".phantom/reports",
   <span class="key">"ringBufferBytes"</span>: 262144,
   <span class="key">"keepReports"</span>:     50,     <span class="dim">// 0 keeps everything</span>
+  <span class="key">"maxTokens"</span>:       null,   <span class="dim">// spend ceiling, tokens</span>
+  <span class="key">"maxCostUsd"</span>:      null,   <span class="dim">// spend ceiling, est. USD</span>
   <span class="key">"claudeBin"</span>:       "claude"
 }</pre>
       </div>
@@ -1160,7 +1178,7 @@ Wall clock               1m 48s</pre>
             <button class="copy" data-c="c9">copy</button>
           </div>
         </div>
-        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 339 tests, no install step.</p>
+        <p class="pane-note">For hacking on it. <code>npm link</code> puts <code>phantom</code> on your PATH from the working tree; 457 tests, no install step.</p>
       </div>
 
       <div class="pane" id="pane-plugin" role="tabpanel" aria-labelledby="tab-plugin" hidden>
@@ -1188,7 +1206,7 @@ Wall clock               1m 48s</pre>
   <div class="wrap" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;width:100%">
     <div class="ghost-note">
       <svg viewBox="0 0 256 256" aria-hidden="true"><path class="mk-body" d="M48 116a80 80 0 0 1 160 0v84a26.67 26.67 0 0 1-53.33 0a26.67 26.67 0 0 1-53.34 0A26.67 26.67 0 0 1 48 200z"/><rect x="96" y="98" width="22" height="40" rx="11" class="mk-eye"/><rect x="138" y="98" width="22" height="40" rx="11" class="mk-eye"/></svg>
-      <span>claude-phantom 0.5.0 — MIT</span>
+      <span>claude-phantom 0.6.0 — MIT</span>
     </div>
     <nav>
       <a href="https://github.com/waazy-w/claude-phantom">github</a>

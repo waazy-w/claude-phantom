@@ -1033,3 +1033,36 @@ test('aborting rescues untracked work instead of deleting it', async () => {
   assert.equal(fs.readFileSync(path.join(repo, 'my-new-file.js'), 'utf8'), 'work I just started\n',
     'and the command it printed brings the work back');
 });
+
+test('two crashes in the same second do not overwrite each other', async () => {
+  // timestamp() has 1-second resolution and named both the capture and the
+  // report, so two quick crashes with the same slug produced the same two
+  // filenames: the second capture silently replaced the first, and the report
+  // was APPENDED to (report.js reads an existing file as the session's output),
+  // yielding one post-mortem with two Verification blocks. Invisible until
+  // `phantom ls` began listing captures and `phantom recover` replaying them.
+  const { uniqueStamp } = require('../src/recovery');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phantom-stamp-'));
+  const names = [];
+  for (let i = 0; i < 3; i++) {
+    const name = uniqueStamp(dir, '20260822-120000', 'boom');
+    fs.writeFileSync(path.join(dir, name + '.json'), '{}');
+    names.push(name);
+  }
+  assert.deepEqual(names, ['20260822-120000-boom', '20260822-120000-boom-2', '20260822-120000-boom-3']);
+  assert.equal(new Set(names).size, 3, 'every capture gets its own pair of filenames');
+
+  // End to end: two recoveries back to back leave two captures and two reports.
+  const repo = makeRepo();
+  const config = makeConfig(repo, { maxIterations: 1 });
+  const first = await runRecovery(makeCtx(repo, config), config, {}, { env: scenarioEnv('noop'), exit: () => {} });
+  const second = await runRecovery(makeCtx(repo, config), config, {}, { env: scenarioEnv('noop'), exit: () => {} });
+  assert.notEqual(first.reportPath, second.reportPath, 'the second run got its own report');
+  const crashes = fs.readdirSync(path.join(repo, '.phantom', 'crashes'));
+  assert.equal(crashes.length, 2, 'both captures survive: ' + crashes.join(', '));
+  for (const p of [first.reportPath, second.reportPath]) {
+    const md = fs.readFileSync(p, 'utf8');
+    assert.equal((md.match(/## Verification \(independent\)/g) || []).length, 1,
+      'one report describes one run: ' + path.basename(p));
+  }
+});

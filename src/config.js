@@ -28,6 +28,13 @@ const DEFAULTS = Object.freeze({
   testCommand: null,
   maxIterations: 3,
   maxMinutes: 15,
+  // maxIterations and maxMinutes bound how often phantom asks and how long it
+  // waits; neither bounds what it SPENDS -- one iteration on a large repo can
+  // cost more than three on a small one, which is why the FAQ's "how much does
+  // it cost?" answer was unsatisfying. null means no ceiling, so nothing
+  // changes for anyone who does not set one. Price table lives in src/budget.js.
+  maxTokens: null,
+  maxCostUsd: null,
   neverTouch: Object.freeze(['.env', '.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '**/*.secret*']),
   webhook: null,
   notify: false,
@@ -103,8 +110,27 @@ function validate(cfg) {
       throw new ConfigError(key + ' must be a non-empty string or null (got ' + JSON.stringify(v) + ')');
     }
   };
+  // A ceiling is opt-in, so null is a first-class value here: it means "no
+  // limit", which is different from an out-of-range number and must not be
+  // coerced into one.
+  const intOrNull = (key, min, max) => {
+    const v = cfg[key];
+    if (v === null || v === undefined) return;
+    if (!Number.isInteger(v) || v < min || v > max) {
+      throw new ConfigError(key + ' must be an integer between ' + min + ' and ' + max + ', or null for no ceiling (got ' + JSON.stringify(v) + ')');
+    }
+  };
+  const numOrNull = (key, min, max) => {
+    const v = cfg[key];
+    if (v === null || v === undefined) return;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) {
+      throw new ConfigError(key + ' must be a number between ' + min + ' and ' + max + ', or null for no ceiling (got ' + JSON.stringify(v) + ')');
+    }
+  };
   int('maxIterations', 1, 10);
   int('maxMinutes', 1, 120);
+  intOrNull('maxTokens', 1000, 100 * 1000 * 1000);
+  numOrNull('maxCostUsd', 0.01, 1000);
   int('ringBufferBytes', 4096, 64 * 1024 * 1024);
   int('keepReports', 0, 10000);
   strOrNull('testCommand');
@@ -137,20 +163,139 @@ function validate(cfg) {
 }
 
 /**
- * Precedence: overrides > .phantomrc (cwd, then git root) > package.json "phantom" > defaults.
+ * Environment variables, one per config key that is useful to set per-run.
+ *
+ * The FAQ recommends running phantom in CI with `--dry-run`, but every setting
+ * that mattered there -- the model, the caps, the test command, the webhook --
+ * could only be changed by committing a `.phantomrc` into the repository. An
+ * env var is how every other wrapper is configured and the only mechanism a
+ * container or a CI job can use without writing a file.
+ */
+const ENV_KEYS = Object.freeze({
+  PHANTOM_TEST: 'testCommand',
+  PHANTOM_MAX_ITERATIONS: 'maxIterations',
+  PHANTOM_MAX_MINUTES: 'maxMinutes',
+  PHANTOM_MAX_TOKENS: 'maxTokens',
+  PHANTOM_MAX_COST_USD: 'maxCostUsd',
+  PHANTOM_MODEL: 'model',
+  PHANTOM_WEBHOOK: 'webhook',
+  PHANTOM_CLAUDE_BIN: 'claudeBin',
+  PHANTOM_REPORT_DIR: 'reportDir',
+  PHANTOM_KEEP_REPORTS: 'keepReports',
+  PHANTOM_NOTIFY: 'notify',
+  PHANTOM_AUTO_COMMIT: 'autoCommit',
+  PHANTOM_PROMPT_ON_FINISH: 'promptOnFinish',
+  PHANTOM_VERIFY_COMMAND: 'verifyCommand',
+});
+
+/** Config keys whose values are booleans, so an env string has to be coerced. */
+const BOOLEAN_KEYS = new Set(['notify', 'autoCommit', 'promptOnFinish', 'verifyCommand']);
+/** ...and the ones that are numbers. */
+const NUMBER_KEYS = new Set(['maxIterations', 'maxMinutes', 'ringBufferBytes', 'keepReports', 'maxTokens']);
+/** Accepts a decimal, unlike NUMBER_KEYS -- a cost ceiling of 0.50 is normal. */
+const DECIMAL_KEYS = new Set(['maxCostUsd']);
+
+/**
+ * Read the env layer.
+ *
+ * Values are coerced, not trusted: an env var is always a string, and handing
+ * `"3"` to a check that demands a number would fail late with a confusing
+ * message. An unparseable boolean is an error rather than a silent `false` --
+ * `PHANTOM_NOTIFY=maybe` meaning "off" is exactly the kind of quiet
+ * misconfiguration that wastes an afternoon.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Partial<Config>}
+ */
+function envLayer(env = process.env) {
+  const out = {};
+  for (const [name, key] of Object.entries(ENV_KEYS)) {
+    const raw = env[name];
+    if (raw === undefined || raw === '') continue;
+    if (BOOLEAN_KEYS.has(key)) {
+      if (/^(1|true|yes|on)$/i.test(raw)) out[key] = true;
+      else if (/^(0|false|no|off)$/i.test(raw)) out[key] = false;
+      else throw new ConfigError(name + ' must be true or false (got ' + JSON.stringify(raw) + ')');
+      continue;
+    }
+    if (DECIMAL_KEYS.has(key)) {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new ConfigError(name + ' must be a number (got ' + JSON.stringify(raw) + ')');
+      out[key] = n;
+      continue;
+    }
+    if (NUMBER_KEYS.has(key)) {
+      if (!/^\d+$/.test(raw)) throw new ConfigError(name + ' must be a whole number (got ' + JSON.stringify(raw) + ')');
+      out[key] = Number(raw);
+      continue;
+    }
+    // `null` is a meaningful value for testCommand/model/webhook -- it is how a
+    // user turns an inherited setting back off for one run.
+    out[key] = raw === 'null' ? null : raw;
+  }
+  return out;
+}
+
+/**
+ * Precedence: overrides (flags) > env > .phantomrc (cwd, then git root)
+ * > package.json "phantom" > defaults.
+ *
+ * Env sits between the flags and the files deliberately: a flag is this
+ * invocation, an env var is this shell or this CI job, and a file is the
+ * repository's own default. A file that could beat the environment would make
+ * `PHANTOM_MODEL=... phantom npm test` silently do nothing in any repo that
+ * happens to ship a `.phantomrc`.
+ *
  * @param {string} [cwd]
  * @param {Partial<Config>} [overrides] undefined values are ignored
+ * @param {{ env?: NodeJS.ProcessEnv, configPath?: string }} [opts]
  * @returns {Config}
  */
-function loadConfig(cwd = process.cwd(), overrides = {}) {
+function loadConfig(cwd = process.cwd(), overrides = {}, opts = {}) {
   const gitRoot = git.root({ cwd });
   const dirs = [...new Set([path.resolve(cwd), gitRoot].filter(Boolean))];
-  const rc = findRc(dirs);
+  // An explicit --config wins over the search entirely, and a path that does
+  // not exist is an error: silently falling back to the search would make a
+  // typo look like "my settings had no effect".
+  let rc;
+  if (opts.configPath) {
+    const file = path.resolve(cwd, opts.configPath);
+    let raw;
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch {
+      throw new ConfigError('config file not found: ' + opts.configPath);
+    }
+    try {
+      rc = { file, data: JSON.parse(raw) };
+    } catch (err) {
+      // Deliberately NOT err.message: Node embeds the first bytes of the file in
+      // its JSON parse error, so `--config ../secrets.env` echoed the start of
+      // whatever it read back to the terminal. The position is enough to fix a
+      // real config file.
+      const at = /position (\d+)/.exec(err.message);
+      throw new ConfigError('invalid JSON in ' + opts.configPath + (at ? ' at position ' + at[1] : ''));
+    }
+  } else {
+    rc = findRc(dirs);
+  }
   const pkg = findPkgField(dirs);
+  const fromEnv = envLayer(opts.env || process.env);
   if (rc) assertObject(rc.data, '.phantomrc');
   if (pkg) assertObject(pkg.data, 'package.json "phantom" field');
 
-  const layers = [DEFAULTS, pkg && pkg.data, rc && rc.data, overrides].filter(Boolean);
+  // Nearest file wins, whichever KIND it is. Ordering rc above pkg globally
+  // meant a .phantomrc at the git root beat a package.json "phantom" field in
+  // the directory you actually ran from -- the opposite of the "first hit
+  // wins, nearest first" rule the help text and README both state. When the two
+  // come from the same directory, .phantomrc stays the more specific of the two.
+  const fileLayers = [pkg, rc].filter(Boolean).sort((a, b) => {
+    const depth = (f) => path.dirname(f.file).split(path.sep).length;
+    const d = depth(a) - depth(b);
+    if (d !== 0) return d;                      // shallower first, so deeper overrides
+    return a === rc ? 1 : -1;                   // same directory: .phantomrc wins
+  }).map((f) => f.data);
+  const layers = [DEFAULTS, ...fileLayers, fromEnv, overrides].filter(Boolean);
   for (const layer of layers.slice(1)) {
     for (const key of Object.keys(layer)) {
       if (!(key in DEFAULTS) && key !== 'alwaysNeverTouch') {
@@ -169,9 +314,10 @@ function loadConfig(cwd = process.cwd(), overrides = {}) {
   cfg.neverTouch = [...new Set([...cfg.neverTouch, ...ALWAYS_NEVER_TOUCH])];
   Object.defineProperty(cfg, 'loadedFrom', {
     enumerable: false,
-    value: [rc && rc.file, pkg && pkg.file].filter(Boolean),
+    value: [rc && rc.file, pkg && pkg.file, Object.keys(fromEnv).length ? 'environment' : null].filter(Boolean),
   });
   return cfg;
 }
 
-module.exports = { loadConfig, ConfigError, DEFAULTS, ALWAYS_NEVER_TOUCH };
+module.exports = {
+  ENV_KEYS, envLayer, loadConfig, ConfigError, DEFAULTS, ALWAYS_NEVER_TOUCH };
